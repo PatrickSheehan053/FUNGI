@@ -1,0 +1,110 @@
+# =============================================================================
+# FUNGI v3 — Pipeline Configuration
+# Functional Unravelling of Network Geometry for Inference
+# =============================================================================
+# This file defines all user-configurable inputs, directory structure, and
+# pipeline parameters for a FUNGI run. Edit the values below to match your
+# dataset and computational environment, then execute the notebook.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. Input Data
+# ---------------------------------------------------------------------------
+# Paths are relative to the project root (the directory containing this file).
+# Absolute paths are also accepted.
+input:
+  # Dense adjacency graph produced by an upstream GRN inference method
+  # Supported formats: .npz (dense or scipy-sparse), .csv (edge list)
+  graph_path: "/scratch/patrick.sheehan/MYCELIUM/comparisons/SPECTRA+GuanLab/outputs/graphs/guanlab_stock_3.5k_directed.npz"
+
+  # Single-cell expression data used by the upstream inference method.
+  # Used to extract perturbation targets for the local-connectivity guardrail.
+  # Set to null if no perturbation metadata is available.
+  sc_data_path: "/scratch/patrick.sheehan/MYCELIUM/data/raw/adata_Training_50k_filtered.h5ad"
+
+  # Column in adata.obs that identifies perturbation conditions.
+  # The non-targeting control label is excluded automatically.
+  perturbation_column: "target_gene"
+  control_label: "non-targeting"
+
+# ---------------------------------------------------------------------------
+# 2. Directory Structure
+# ---------------------------------------------------------------------------
+# All output is written under output.root_dir, organized by pipeline phase.
+# Directories are created automatically on first run.
+output:
+  root_dir: "data/output"
+  phases:
+    - "phase1_ingestion"
+    - "phase2_normalization"
+    - "phase3_search_engine"
+    - "phase4_pareto_triage"
+    - "phase5_biological_audit"
+  figures_dir: "data/output/figures"
+
+# ---------------------------------------------------------------------------
+# 3. Pre-filtering (Adaptive Thresholding)
+# ---------------------------------------------------------------------------
+# Reduces the dense graph to a manageable candidate pool before the DASH
+# kernel. The target_density sets the fraction of edges retained.
+prefilter:
+  target_density: 0.20        # Retain the top 20% of edges by weight
+
+# ---------------------------------------------------------------------------
+# 4. DASH Kernel — Global Search (Latin Hypercube Sampling)
+# ---------------------------------------------------------------------------
+# Phase 3A: Uniform exploration of the 5-dimensional hyperparameter space
+# using a Latin Hypercube design.
+global_search:
+  n_samples: 12000            # Number of LHS sample points
+  chunk_size: 1200            # Shard size for fault-tolerant execution
+  n_jobs: 15                  # Parallel workers (set to available CPU cores)
+
+# ---------------------------------------------------------------------------
+# 5. DASH Kernel — Targeted Search (Surrogate-Guided Refinement)
+# ---------------------------------------------------------------------------
+# Phase 3B: A tri-model surrogate (GMM + RF classifier + RF regressor) is
+# trained on the global search results, then used to generate candidates
+# concentrated in the high-performance region of the landscape.
+targeted_search:
+  elite_percentile: 0.15      # Fraction of global results used as "elite"
+  n_hallucinate: 150000       # Candidate points sampled from the surrogate
+  n_select: 8000              # Final points forwarded to the DASH engine
+  min_survival_prob: 0.90     # Classifier confidence threshold
+  n_jobs: 15
+
+# ---------------------------------------------------------------------------
+# 6. Pareto Triage (Phase 4)
+# ---------------------------------------------------------------------------
+# Archetypal weighting schemes for multi-objective ranking of the merged
+# search results. Each archetype emphasizes a different biological prior.
+pareto:
+  top_k_generalists: 500      # How many lowest-loss graphs enter triage
+  audit_cohort_size: 50       # Final graphs forwarded to biological audit
+  graphs_per_archetype: 10    # Unique graphs selected per archetype
+
+  # Utopian target zones for the six output topology parameters.
+  # Graphs inside these bounds incur zero penalty; graphs outside are
+  # penalized proportionally to their distance.
+  utopian_bounds:
+    alpha:  [2.1,  2.7]       # Scale-free exponent
+    rho:    [-0.20, -0.05]    # Degree assortativity
+    gini:   [0.60, 0.80]      # Degree inequality (Gini coefficient)
+    C:      [0.10, 0.25]      # Average clustering coefficient
+    Q:      [0.28, 0.48]      # Louvain modularity
+    S_max:  [0.04, 0.09]      # Hub saturation (max_degree / N)
+
+  # Per-archetype penalty weights: {alpha, C, Q, gini, rho, saturation}
+  archetype_weights:
+    generalist:    { alpha: 10, C:  5, Q: 10, gini:  5, rho:  5, sat: 15 }
+    structuralist: { alpha: 30, C:  2, Q:  2, gini:  5, rho: 20, sat: 15 }
+    hierarchist:   { alpha:  5, C:  2, Q:  2, gini: 30, rho:  5, sat: 40 }
+    modularist:    { alpha:  5, C: 20, Q: 40, gini:  2, rho:  2, sat: 15 }
+
+# ---------------------------------------------------------------------------
+# 7. Runtime Options
+# ---------------------------------------------------------------------------
+runtime:
+  # Set all BLAS/OpenMP thread counts to 1 to prevent contention with joblib.
+  single_threaded_blas: true
+  random_seed: 42
