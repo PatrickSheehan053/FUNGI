@@ -81,9 +81,16 @@ def extract_anchors(df_results, top_fraction=0.05, n_clusters=50,
     anchor_records = []
     for cluster_id in range(actual_k):
         cluster_df = df_elite[df_elite["cluster"] == cluster_id]
-        if len(cluster_df) == 0:
+        
+        # FIX: Drop any rows where utopia_loss failed to calculate (NaNs)
+        clean_cluster = cluster_df.dropna(subset=["utopia_loss"])
+        
+        # Check if the cluster is empty AFTER dropping NaNs
+        if len(clean_cluster) == 0:
             continue
-        best_row = cluster_df.loc[cluster_df["utopia_loss"].idxmin()]
+            
+        # Find the minimum on the clean data
+        best_row = clean_cluster.loc[clean_cluster["utopia_loss"].idxmin()]
         anchor_records.append(best_row)
 
     df_anchors = pd.DataFrame(anchor_records)
