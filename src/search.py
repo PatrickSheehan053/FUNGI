@@ -243,14 +243,30 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
         for chunk in chunks
     ]
 
-    # Collect results with progress tracking
+    import os
+    import pandas as pd
+    
+    # Create a directory to hold the safety shards
+    shard_dir = "data/output/phase3_expansive_search/shards"
+    os.makedirs(shard_dir, exist_ok=True)
+
+    # Collect results with progress tracking AND Sharding
     all_results = []
     completed = 0
     while futures:
         done, futures = ray.wait(futures, num_returns=1)
         chunk_results = ray.get(done[0])
+        
+        # --- NEW SHARDING LOGIC ---
+        # Instantly save this chunk to the hard drive
+        shard_df = pd.DataFrame(chunk_results)
+        shard_file = os.path.join(shard_dir, f"chunk_{completed}_results.csv")
+        shard_df.to_csv(shard_file, index=False)
+        # --------------------------
+
         all_results.extend(chunk_results)
         completed += 1
+        
         if completed % 5 == 0 or completed == len(chunks):
             print(f"  Progress: {completed}/{len(chunks)} chunks "
                   f"({len(all_results):,}/{n_total:,} graphs)")
