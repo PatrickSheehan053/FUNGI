@@ -1,5 +1,5 @@
 # =============================================================================
-# FUNGI v3 — Pipeline Configuration
+# FUNGI v6 -- Pipeline Configuration
 # Functional Unravelling of Network Geometry for Inference
 # =============================================================================
 # This file defines all user-configurable inputs, directory structure, and
@@ -10,101 +10,218 @@
 # ---------------------------------------------------------------------------
 # 1. Input Data
 # ---------------------------------------------------------------------------
-# Paths are relative to the project root (the directory containing this file).
-# Absolute paths are also accepted.
-input:
-  # Dense adjacency graph produced by an upstream GRN inference method
-  # Supported formats: .npz (dense or scipy-sparse), .csv (edge list)
-  graph_path: "/scratch/patrick.sheehan/MYCELIUM/comparisons/SPECTRA+GuanLab/outputs/graphs/guanlab_stock_3.5k_directed.npz"
 
-  # Single-cell expression data used by the upstream inference method.
-  # Used to extract perturbation targets for the local-connectivity guardrail.
-  # Set to null if no perturbation metadata is available.
-  sc_data_path: "/scratch/patrick.sheehan/MYCELIUM/data/raw/adata_Training_50k_filtered.h5ad"
+input:
+  # Dense adjacency graph produced by an upstream GRN inference method.
+  # Supported formats: .npz (dense or scipy-sparse), .csv (edge list)
+  graph_path: 
+
+  # Single-cell expression data used by the upstream GRN inference method.
+  # Required for Phase 0 diagnostics and perturbation-aware pruning.
+  sc_data_path: 
 
   # Column in adata.obs that identifies perturbation conditions.
-  # The non-targeting control label is excluded automatically.
   perturbation_column: "target_gene"
   control_label: "non-targeting"
+
+  # Whether the h5ad contains metacell-aggregated data (affects diagnostic
+  # scaling for Gini, Silhouette midpoints, and E-distance normalization).
+  is_metacell: True
+
+  # If metacell, the average number of raw cells per metacell (used for
+  # variance correction in the S_max diagnostic). Set to null if unknown.
+  metacell_pooling_factor: 10
 
 # ---------------------------------------------------------------------------
 # 2. Directory Structure
 # ---------------------------------------------------------------------------
-# All output is written under output.root_dir, organized by pipeline phase.
-# Directories are created automatically on first run.
+
 output:
   root_dir: "data/output"
   phases:
+    - "phase0_diagnostics"
     - "phase1_ingestion"
     - "phase2_normalization"
-    - "phase3_search_engine"
-    - "phase4_pareto_triage"
-    - "phase5_biological_audit"
+    - "phase3_expansive_search"
+    - "phase4_niching"
+    - "phase5_turbo_refinement"
+    - "phase6_audit"
   figures_dir: "data/output/figures"
 
 # ---------------------------------------------------------------------------
-# 3. Pre-filtering (Adaptive Thresholding)
+# 3. Phase 0 -- Data-Driven Diagnostics
 # ---------------------------------------------------------------------------
-# Reduces the dense graph to a manageable candidate pool before the DASH
-# kernel. The target_density sets the fraction of edges retained.
+# Replaces the fixed archetype system. Scans the training h5ad to derive
+# custom utopian bounds and loss weights tailored to the specific dataset.
+
+diagnostics:
+  # Number of bootstrap resamples for confidence intervals on Gini and alpha.
+  n_bootstrap: 1000
+
+  # Differential expression parameters for impact array construction.
+  de_method: "wilcoxon"      # scanpy.tl.rank_genes_groups method
+  de_pval_threshold: 0.05    # adjusted p-value cutoff for DEG counting
+  de_lfc_threshold: 0.25     # minimum absolute log-fold-change
+
+  # KNN graph construction for modularity/clustering reverse-engineering.
+  knn_k_range: [5, 10, 15]   # range of k values to sweep
+
+  # Weight scaling floors and ceilings (prevents optimizer collapse).
+  weight_floor: 1.0
+  weight_ceiling: 50.0
+
+  # Minimum and maximum allowed width for each utopian bound range.
+  # Prevents over-constraining (too narrow) or wasting compute (too wide).
+  bound_constraints:
+    alpha:
+      delta_min: 0.20
+      delta_max: 0.80
+      hard_floor: 1.8
+      hard_ceiling: 4.0
+    gini:
+      delta_min: 0.10
+      delta_max: 0.40
+      hard_floor: 0.0
+      hard_ceiling: 1.0
+    S_max:
+      delta_min: 0.02
+      delta_max: 0.10
+      hard_floor: 0.01
+      hard_ceiling: 0.30
+    Q:
+      delta_min: 0.10
+      delta_max: 0.40
+      hard_floor: -0.5
+      hard_ceiling: 1.0
+    C:
+      delta_min: 0.05
+      delta_max: 0.30
+      hard_floor: 0.0
+      hard_ceiling: 1.0
+    rho:
+      delta_min: 0.10
+      delta_max: 0.40
+      hard_floor: -1.0
+      hard_ceiling: 1.0
+
+  # Metacell-specific sigmoid midpoint adjustments.
+  metacell_silhouette_midpoint: 0.60
+  singlecell_silhouette_midpoint: 0.25
+
+# ---------------------------------------------------------------------------
+# 4. Pre-filtering (Adaptive Thresholding)
+# ---------------------------------------------------------------------------
+
 prefilter:
-  target_density: 0.20        # Retain the top 20% of edges by weight
+  target_density: 0.20
 
 # ---------------------------------------------------------------------------
-# 4. DASH Kernel — Global Search (Latin Hypercube Sampling)
+# 5. Static Hyperparameter Bounds (Search Space)
 # ---------------------------------------------------------------------------
-# Phase 3A: Uniform exploration of the 5-dimensional hyperparameter space
-# using a Latin Hypercube design.
-global_search:
-  n_samples: 12000            # Number of LHS sample points
-  chunk_size: 1200            # Shard size for fault-tolerant execution
-  n_jobs: 15                  # Parallel workers (set to available CPU cores)
+# These bounds define the 6D volume that the Sobol sequence fills.
+# They are deliberately kept static across all datasets. The dynamic
+# utopian loss function (with data-driven weights and bounds from Phase 0)
+# is what guides the optimizer to the correct region within this volume.
+
+hyperparameter_bounds:
+  beta:   [1.0,  5.0]
+  gamma:  [0.0,  2.5]
+  delta:  [0.0,  1.0]
+  kappa:  [0.02, 0.08]
+  # k_core: average degree of the topological core (linear scaling).
+  # target_edges = n_genes * k_core. Corrected from [30, 150] to prevent
+  # the core from demanding more edges than exist in the global graph.
+  k_core: [1.0,  15.0]
+  # lambda: mean connectivity. Scales linearly with n_genes.
+  # Actual bounds computed at runtime as [n * 0.001, n * 0.020].
+  lambda_density: [0.001, 0.020]
 
 # ---------------------------------------------------------------------------
-# 5. DASH Kernel — Targeted Search (Surrogate-Guided Refinement)
+# 6. Expansive Search (Phase 3 -- Sobol + Ray)
 # ---------------------------------------------------------------------------
-# Phase 3B: A tri-model surrogate (GMM + RF classifier + RF regressor) is
-# trained on the global search results, then used to generate candidates
-# concentrated in the high-performance region of the landscape.
-targeted_search:
-  elite_percentile: 0.15      # Fraction of global results used as "elite"
-  n_hallucinate: 150000       # Candidate points sampled from the surrogate
-  n_select: 8000              # Final points forwarded to the DASH engine
-  min_survival_prob: 0.90     # Classifier confidence threshold
-  n_jobs: 15
+
+expansive_search:
+  n_samples: 100000
+  n_workers: 15           # Ray remote workers
+  chunk_size: 5000        # Graphs evaluated per Ray task
+  random_seed: 42
 
 # ---------------------------------------------------------------------------
-# 6. Pareto Triage (Phase 4)
+# 7. Shatter Criteria
 # ---------------------------------------------------------------------------
-# Archetypal weighting schemes for multi-objective ranking of the merged
-# search results. Each archetype emphasizes a different biological prior.
-pareto:
-  top_k_generalists: 500      # How many lowest-loss graphs enter triage
-  audit_cohort_size: 50       # Final graphs forwarded to biological audit
-  graphs_per_archetype: 10    # Unique graphs selected per archetype
+# A graph is immediately discarded if ANY of these conditions trigger.
+# Lightweight checks are evaluated first (fail-fast ordering).
 
-  # Utopian target zones for the six output topology parameters.
-  # Graphs inside these bounds incur zero penalty; graphs outside are
-  # penalized proportionally to their distance.
-  utopian_bounds:
-    alpha:  [2.1,  2.7]       # Scale-free exponent
-    rho:    [-0.20, -0.05]    # Degree assortativity
-    gini:   [0.60, 0.80]      # Degree inequality (Gini coefficient)
-    C:      [0.10, 0.25]      # Average clustering coefficient
-    Q:      [0.28, 0.48]      # Louvain modularity
-    S_max:  [0.04, 0.09]      # Hub saturation (max_degree / N)
+shatter:
+  # --- Original criteria ---
+  # Density collapse: graph has too many edges (hairball).
+  max_edge_count: 500000
 
-  # Per-archetype penalty weights: {alpha, C, Q, gini, rho, saturation}
-  archetype_weights:
-    generalist:    { alpha: 10, C:  5, Q: 10, gini:  5, rho:  5, sat: 15 }
-    structuralist: { alpha: 30, C:  2, Q:  2, gini:  5, rho: 20, sat: 15 }
-    hierarchist:   { alpha:  5, C:  2, Q:  2, gini: 30, rho:  5, sat: 40 }
-    modularist:    { alpha:  5, C: 20, Q: 40, gini:  2, rho:  2, sat: 15 }
+  # Orphan collapse: too many genes with zero connections.
+  max_orphan_fraction: 0.70
+
+  # Dictator hub: single gene regulates too large a fraction.
+  max_hub_saturation: 0.15
+
+  # Scale-free degeneration: power-law exponent outside viable range.
+  alpha_floor: 1.8
+  alpha_ceiling: 3.5
+
+  # Clustering collapse: internal module structure dissolved.
+  min_clustering: 0.01
+
+  # --- New criteria (v6) ---
+  # Spectral masking: dominant eigenvalue absorbs all local variation.
+  # Ratio = lambda_1 / lambda_2. If this exceeds the threshold, the
+  # graph has collapsed into a single global mode.
+  max_spectral_dominance_ratio: 50.0
+
+  # Spatial coherence (Moran's I): measures whether neighboring genes
+  # provide rank-consistent regulatory advice. A value near zero or
+  # negative indicates random noise (house-of-cards topology).
+  min_morans_i: 0.02
+
+  # GWCC percolation: giant weakly connected component fraction.
+  min_gwcc_fraction: 0.30
 
 # ---------------------------------------------------------------------------
-# 7. Runtime Options
+# 8. Spatial Niching (Phase 4 -- Bridge to TuRBO)
 # ---------------------------------------------------------------------------
+
+niching:
+  top_fraction: 0.05       # Keep top 5% of surviving Sobol graphs
+  n_clusters: 50           # K-Means spatial niches in 6D
+
+# ---------------------------------------------------------------------------
+# 9. TuRBO Refinement (Phase 5)
+# ---------------------------------------------------------------------------
+
+turbo:
+  max_evaluations: 10000   # Hard budget across all trust regions
+  batch_size: 20           # Candidates proposed per trust region per round
+  initial_length: 0.05     # Initial trust region side-length (fraction)
+  min_length: 0.001        # Convergence threshold
+  success_threshold: 3     # Consecutive improvements before expansion
+  failure_threshold: 5     # Consecutive failures before contraction
+
+# ---------------------------------------------------------------------------
+# 10. Audit Phase (Phase 6)
+# ---------------------------------------------------------------------------
+
+audit:
+  cohort_size: 50
+
+  # Expensive topology checks run ONLY on the final audit cohort.
+  # These are too slow for the 100k expansive search.
+  persistence_homology: true
+  epr_check: true
+  epr_min_threshold: 1.0   # EPR below this marks a shattered graph
+
+# ---------------------------------------------------------------------------
+# 11. Runtime Options
+# ---------------------------------------------------------------------------
+
 runtime:
-  # Set all BLAS/OpenMP thread counts to 1 to prevent contention with joblib.
   single_threaded_blas: true
   random_seed: 42
+  log_level: "INFO"
