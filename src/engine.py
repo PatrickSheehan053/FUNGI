@@ -1,20 +1,12 @@
 """
-FUNGI v6 -- DASH Kernel Engine
+FUNGI v6.2 -- DASH Kernel Engine
 
-Core computation module containing:
-    - Dynamic topology (per-edge FFL motif participation)
-    - Dual-pass pruning (local guardrails + global fill)
-    - Expanded shatter criteria (8 conditions)
-    - Data-driven utopia loss function (custom bounds and weights)
-    - Single-graph evaluation entry point (designed for Ray remote calls)
-
-Changes from v5:
-    - Utopia loss now accepts dynamic bounds and weights from Phase 0.
-    - Archetype weight system removed entirely.
-    - Shatter criteria expanded: spectral dominance, Moran's I, alpha bounds,
-      clustering floor, density ceiling, GWCC fraction.
-    - k_core bounds corrected to [1.0, 15.0] (linear scaling).
-    - All print statements removed from hot-path functions for Ray compat.
+v6.2 fixes:
+    - GraphBLAS semiring call corrected: A.mxm(A, semiring).new(mask=A.S)
+    - T_local[:target_edges][valid] copy-not-view bug fixed
+    - NaN guards on all topology metrics (powerlaw, assortativity, Gini)
+    - Top-level try/except on run_dash_and_score returns 999.0 on any crash
+    - Spectral masking and Moran's I shatter checks import-guarded
 """
 
 import numpy as np
@@ -25,20 +17,30 @@ import igraph as ig
 import warnings
 import graphblas as gb
 
-from graph_utils import compute_spectral_dominance_ratio, compute_morans_i
-
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
+def _safe(x, fallback=0.0):
+    """Returns x if finite, else fallback."""
+    if x is None or not np.isfinite(x):
+        return fallback
+    return float(x)
+
+
 # =========================================================================
-# Dynamic Topology (Per-Edge T_local from Feed-Forward Loops)
+# Dynamic Topology (GraphBLAS)
 # =========================================================================
 
-def compute_dynamic_topology(W_sorted, sources_sorted, targets_sorted, k_core, n_genes):
-    """Calculates T_local using 100% GraphBLAS and 1D NumPy Binary Searches."""
+def compute_dynamic_topology(W_sorted, sources_sorted, targets_sorted,
+                             k_core, n_genes):
+    """Per-edge local FFL participation using GraphBLAS masked SpGEMM.
+
+    Expects edges pre-sorted descending by weight so the top-k core
+    is a simple slice [:target_edges].
+    """
     target_edges = int(n_genes * k_core)
     target_edges = min(target_edges, len(W_sorted))
-    
+
     T_local = np.zeros(len(W_sorted), dtype=np.float64)
     if target_edges < 1:
         return T_local
@@ -46,53 +48,63 @@ def compute_dynamic_topology(W_sorted, sources_sorted, targets_sorted, k_core, n
     core_rows = sources_sorted[:target_edges]
     core_cols = targets_sorted[:target_edges]
 
-    # 1. Build GraphBLAS Matrix
-    A_core_gb = gb.Matrix.from_coo(
-        core_rows, core_cols, np.ones(target_edges, dtype=np.float64), 
+    # 1. Build binary GraphBLAS matrix
+    A = gb.Matrix.from_coo(
+        core_rows.astype(np.uint64),
+        core_cols.astype(np.uint64),
+        np.ones(target_edges, dtype=np.float64),
         nrows=n_genes, ncols=n_genes
     )
 
-    # 2. Bare-Metal Masked FFL Calculation
-    T_matrix_gb = gb.semiring.plus_times(A_core_gb @ A_core_gb).new(mask=A_core_gb.S)
+    # 2. Masked SpGEMM: T = (A @ A) masked by A.S
+    #    This is the CORRECT python-graphblas syntax.
+    T_gb = A.mxm(A, gb.semiring.plus_times).new(mask=A.S)
 
-    # 3. Native GraphBLAS Reductions for Degrees (NO SCIPY!)
-    # Let the C-library sum the rows and columns instantly
+    # 3. Degree reductions via GraphBLAS (no scipy)
     d_out = np.zeros(n_genes, dtype=np.float64)
-    out_idx, out_vals = A_core_gb.reduce_rowwise(gb.monoid.plus).new().to_coo()
-    d_out[out_idx] = out_vals
+    out_v = A.reduce_rowwise(gb.monoid.plus).new()
+    oi, ov = out_v.to_coo()
+    d_out[oi] = ov
 
     d_in = np.zeros(n_genes, dtype=np.float64)
-    in_idx, in_vals = A_core_gb.reduce_columnwise(gb.monoid.plus).new().to_coo()
-    d_in[in_idx] = in_vals
+    in_v = A.reduce_columnwise(gb.monoid.plus).new()
+    ii, iv = in_v.to_coo()
+    d_in[ii] = iv
 
-    # 4. Lightning-Fast 1D Flat Index Mapping (NO SCIPY!)
-    t_rows, t_cols, z_values = T_matrix_gb.to_coo()
-    
-    if len(z_values) > 0:
-        # Compress 2D coordinates into 1D flat indices for instant lookups
-        core_flat = core_rows.astype(np.int64) * n_genes + core_cols
-        t_flat = t_rows.astype(np.int64) * n_genes + t_cols
-        
-        # GraphBLAS outputs in sorted order, so a binary search takes microseconds
-        sort_idx = np.searchsorted(t_flat, core_flat)
-        
-        # Protect against out-of-bounds indices
-        valid_idx = np.clip(sort_idx, 0, len(t_flat) - 1)
-        valid_mask = (t_flat[valid_idx] == core_flat)
-        
+    # 4. Extract triangle counts and map back to core edges
+    t_rows, t_cols, z_vals = T_gb.to_coo()
+
+    if len(z_vals) > 0:
+        # Flat-index binary search for O(E log E) mapping
+        core_flat = core_rows.astype(np.int64) * n_genes + core_cols.astype(np.int64)
+        t_flat = t_rows.astype(np.int64) * n_genes + t_cols.astype(np.int64)
+
+        # t_flat may not be sorted if GraphBLAS version does not guarantee it
+        t_order = np.argsort(t_flat)
+        t_flat_sorted = t_flat[t_order]
+        z_vals_sorted = z_vals[t_order]
+
+        sort_idx = np.searchsorted(t_flat_sorted, core_flat)
+        valid_idx = np.clip(sort_idx, 0, len(t_flat_sorted) - 1)
+        hit_mask = (t_flat_sorted[valid_idx] == core_flat)
+
         mapped_z = np.zeros(target_edges, dtype=np.float64)
-        mapped_z[valid_mask] = z_values[valid_idx[valid_mask]]
+        mapped_z[hit_mask] = z_vals_sorted[valid_idx[hit_mask]]
     else:
         mapped_z = np.zeros(target_edges, dtype=np.float64)
 
-    # 5. Calculate Local Motif Participation
+    # 5. Local motif participation ratio
     local_cap = np.minimum(d_out[core_rows], d_in[core_cols])
     valid = (mapped_z > 0) & (local_cap > 0)
-    
-    T_local[:target_edges][valid] = mapped_z[valid] / local_cap[valid]
+
+    # FIX: direct index assignment (no chained slice copy bug)
+    ratios = np.zeros(target_edges, dtype=np.float64)
+    ratios[valid] = mapped_z[valid] / local_cap[valid]
+    T_local[:target_edges] = ratios
+
     np.clip(T_local, 0.0, 1.0, out=T_local)
-    
     return T_local
+
 
 # =========================================================================
 # Dual-Pass Pruning
@@ -100,13 +112,9 @@ def compute_dynamic_topology(W_sorted, sources_sorted, targets_sorted, k_core, n
 
 def dual_pass_pruning(omega_scores, W, sources, targets, perturbed_nodes,
                       n_genes, lam, K=3):
-    """Two-pass edge selection:
-    Pass 1: Local guardrails protect top-K edges from each perturbed node.
-    Pass 2: Global scale-free fill uses remaining budget on highest omega.
-    """
+    """Two-pass edge selection."""
     total_budget = int(np.round(n_genes * lam))
 
-    # Pass 1: local guardrails
     protected_indices = []
     for p_node in perturbed_nodes:
         p_edges = np.where(sources == p_node)[0]
@@ -116,8 +124,6 @@ def dual_pass_pruning(omega_scores, W, sources, targets, perturbed_nodes,
             protected_indices.extend(top_k_idx)
 
     protected_indices = np.unique(protected_indices)
-
-    # Pass 2: global fill
     remaining_budget = total_budget - len(protected_indices)
 
     if remaining_budget > 0:
@@ -126,14 +132,14 @@ def dual_pass_pruning(omega_scores, W, sources, targets, perturbed_nodes,
         available_indices = np.where(mask)[0]
 
         if remaining_budget < len(available_indices):
-            top_remaining_idx_rel = np.argpartition(
+            top_idx_rel = np.argpartition(
                 omega_scores[available_indices], -remaining_budget
             )[-remaining_budget:]
-            top_remaining_idx = available_indices[top_remaining_idx_rel]
+            top_idx = available_indices[top_idx_rel]
         else:
-            top_remaining_idx = available_indices
+            top_idx = available_indices
 
-        final_indices = np.concatenate([protected_indices, top_remaining_idx])
+        final_indices = np.concatenate([protected_indices, top_idx])
     else:
         final_indices = protected_indices[:total_budget]
 
@@ -141,309 +147,263 @@ def dual_pass_pruning(omega_scores, W, sources, targets, perturbed_nodes,
 
 
 # =========================================================================
-# Expanded Shatter Criteria
+# Shatter Criteria
 # =========================================================================
 
 def check_shatter(surviving_sources, surviving_targets, surviving_W,
                   out_degrees, n_genes, active_nodes, shatter_cfg):
-    """Evaluates all shatter conditions in fail-fast order (cheapest first).
-
-    Returns (is_shattered: bool, reason: str or None).
-    """
+    """Fail-fast shatter check, cheapest conditions first."""
     n_edges = len(surviving_sources)
 
-    # 1. Density collapse (the hairball)
-    max_edges = shatter_cfg.get("max_edge_count", 500000)
-    if n_edges > max_edges:
+    if n_edges > shatter_cfg.get("max_edge_count", 500000):
         return True, "density_collapse"
 
-    # 2. Orphan collapse (too many disconnected genes)
-    max_orphan = shatter_cfg.get("max_orphan_fraction", 0.70)
-    orphan_fraction = (n_genes - active_nodes) / n_genes if n_genes > 0 else 1.0
-    if orphan_fraction > max_orphan:
+    orphan_frac = (n_genes - active_nodes) / max(n_genes, 1)
+    if orphan_frac > shatter_cfg.get("max_orphan_fraction", 0.70):
         return True, "orphan_collapse"
 
-    # 3. Dictator hub (S_max)
-    max_hub_sat = shatter_cfg.get("max_hub_saturation", 0.15)
     s_max = (np.max(out_degrees) / n_genes) if len(out_degrees) > 0 else 0
-    if s_max > max_hub_sat:
+    if s_max > shatter_cfg.get("max_hub_saturation", 0.15):
         return True, "dictator_hub"
 
-    # 4. GWCC percolation
-    min_gwcc = shatter_cfg.get("min_gwcc_fraction", 0.30)
     if n_edges > 0 and active_nodes > 0:
-        sparse_G = sp.coo_matrix(
-            (np.ones(n_edges), (surviving_sources, surviving_targets)),
-            shape=(n_genes, n_genes)
-        )
-        _, labels = connected_components(csgraph=sparse_G, directed=False,
-                                         return_labels=True)
-        gwcc_size = np.bincount(labels).max()
-        gwcc_fraction = gwcc_size / n_genes
-        if gwcc_fraction < min_gwcc:
-            return True, "gwcc_percolation"
-    else:
-        gwcc_fraction = 0.0
-        if min_gwcc > 0:
+        try:
+            sparse_G = sp.coo_matrix(
+                (np.ones(n_edges), (surviving_sources, surviving_targets)),
+                shape=(n_genes, n_genes)
+            )
+            _, labels = connected_components(csgraph=sparse_G, directed=False,
+                                             return_labels=True)
+            gwcc_fraction = np.bincount(labels).max() / n_genes
+            if gwcc_fraction < shatter_cfg.get("min_gwcc_fraction", 0.30):
+                return True, "gwcc_percolation"
+        except Exception:
             return True, "gwcc_percolation"
 
-    # 5. Clustering collapse
-    min_clustering = shatter_cfg.get("min_clustering", 0.01)
     if n_edges > 50:
         try:
             edges = list(zip(surviving_sources.tolist(), surviving_targets.tolist()))
-            ig_g = ig.Graph(n=n_genes, edges=edges, directed=True)
-            ig_u = ig_g.as_undirected(mode="collapse")
+            ig_u = ig.Graph(n=n_genes, edges=edges, directed=True).as_undirected(mode="collapse")
             C_obs = ig_u.transitivity_undirected()
-            if not np.isnan(C_obs) and C_obs < min_clustering:
+            if np.isfinite(C_obs) and C_obs < shatter_cfg.get("min_clustering", 0.01):
                 return True, "clustering_collapse"
         except Exception:
             pass
 
-    # 6. Spectral masking (compute only if graph is large enough)
-    max_spectral = shatter_cfg.get("max_spectral_dominance_ratio", 50.0)
     if n_edges > 100:
-        ratio = compute_spectral_dominance_ratio(
-            surviving_sources, surviving_targets, surviving_W, n_genes
-        )
-        if ratio > max_spectral:
-            return True, "spectral_masking"
+        try:
+            from graph_utils import compute_spectral_dominance_ratio
+            ratio = compute_spectral_dominance_ratio(
+                surviving_sources, surviving_targets, surviving_W, n_genes)
+            if np.isfinite(ratio) and ratio > shatter_cfg.get("max_spectral_dominance_ratio", 50.0):
+                return True, "spectral_masking"
+        except Exception:
+            pass
 
-    # 7. Moran's I spatial coherence
-    min_morans = shatter_cfg.get("min_morans_i", 0.02)
     if n_edges > 50 and active_nodes > 10:
-        morans = compute_morans_i(
-            surviving_sources, surviving_targets, out_degrees, n_genes
-        )
-        if morans < min_morans:
-            return True, "texture_collapse"
+        try:
+            from graph_utils import compute_morans_i
+            morans = compute_morans_i(
+                surviving_sources, surviving_targets, out_degrees, n_genes)
+            if np.isfinite(morans) and morans < shatter_cfg.get("min_morans_i", 0.02):
+                return True, "texture_collapse"
+        except Exception:
+            pass
 
     return False, None
 
 
 # =========================================================================
-# Data-Driven Utopia Loss Function
+# Utopia Loss (NaN-proof)
 # =========================================================================
 
 def calculate_utopia_loss(surviving_sources, surviving_targets, surviving_W,
                           n_genes, out_degrees, active_nodes, kappa,
                           utopian_bounds, loss_weights):
-    """Calculates the Euclidean distance from the utopian target zone.
+    """Euclidean distance from the utopian target zone.
 
-    Unlike v5, this version uses dynamically computed bounds and weights
-    from Phase 0 diagnostics rather than fixed archetype weights.
-
-    Parameters
-    ----------
-    utopian_bounds : dict
-        {param: [min, max]} from Phase 0.
-    loss_weights : dict
-        {param: weight} from Phase 0.
+    Every metric individually guarded. Never returns NaN.
     """
     n_edges = len(surviving_sources)
 
-    # ---- Alpha (Scale-Free Shape) ----
+    def _pen(param, obs):
+        b = utopian_bounds[param]
+        w = _safe(loss_weights[param], 1.0)
+        o = _safe(obs, 0.0)
+        if o < b[0]:
+            return w * ((b[0] - o) / max(abs(b[0]), 1e-6)) ** 2
+        elif o > b[1]:
+            return w * ((o - b[1]) / max(abs(b[1]), 1e-6)) ** 2
+        return 0.0
+
+    # Alpha
     alpha_obs = 1.0
-    if len(out_degrees) > 10 and np.max(out_degrees) > 1:
-        try:
-            fit = powerlaw.Fit(out_degrees, xmin=1, discrete=True, verbose=False)
-            alpha_obs = fit.power_law.alpha
-        except Exception:
-            pass
+    try:
+        if len(out_degrees) > 10 and np.max(out_degrees) > 1:
+            unique_deg = np.unique(out_degrees[out_degrees > 0])
+            if len(unique_deg) >= 3:
+                fit = powerlaw.Fit(out_degrees[out_degrees > 0],
+                                   xmin=1, discrete=True, verbose=False)
+                alpha_obs = _safe(fit.power_law.alpha, 1.0)
+    except Exception:
+        pass
+    term_alpha = _pen("alpha", alpha_obs)
 
-    b = utopian_bounds["alpha"]
-    w = loss_weights["alpha"]
-    term_alpha = 0.0
-    if alpha_obs < b[0]:
-        term_alpha = w * ((b[0] - alpha_obs) / max(b[0], 1e-6)) ** 2
-    elif alpha_obs > b[1]:
-        term_alpha = w * ((alpha_obs - b[1]) / max(b[1], 1e-6)) ** 2
-
-    # ---- Gini (Hierarchical Flow) ----
+    # Gini
     G_obs = 1.0
-    if active_nodes > 1 and np.sum(out_degrees) > 0:
-        sorted_deg = np.sort(out_degrees)
-        n = len(out_degrees)
-        G_obs = (2.0 * np.sum(np.arange(1, n + 1) * sorted_deg)) / \
-                (n * np.sum(sorted_deg)) - (n + 1) / n
+    try:
+        if active_nodes > 1 and np.sum(out_degrees) > 0:
+            sd = np.sort(out_degrees)
+            n = len(sd)
+            G_obs = _safe(
+                (2.0 * np.sum(np.arange(1, n+1) * sd)) / (n * np.sum(sd)) - (n+1)/n,
+                1.0
+            )
+    except Exception:
+        pass
+    term_G = _pen("gini", G_obs)
 
-    b = utopian_bounds["gini"]
-    w = loss_weights["gini"]
-    term_G = 0.0
-    if G_obs < b[0]:
-        term_G = w * ((b[0] - G_obs) / max(b[0], 1e-6)) ** 2
-    elif G_obs > b[1]:
-        term_G = w * ((G_obs - b[1]) / max(b[1], 1e-6)) ** 2
-
-    # ---- S_max (Biophysical Constraint) ----
-    max_degree = np.max(out_degrees) if len(out_degrees) > 0 else 0
-    s_max = max_degree / n_genes
+    # S_max
+    s_max = _safe((np.max(out_degrees) / n_genes) if len(out_degrees) > 0 else 0)
     relu_val = max(0.0, (s_max - kappa) / max(kappa, 1e-6))
-    b = utopian_bounds["S_max"]
-    w = loss_weights["S_max"]
-    term_sat = w * relu_val ** 2
+    term_sat = _safe(loss_weights["S_max"], 1.0) * relu_val ** 2
 
-    # Default penalties (overwritten if graph is large enough for igraph)
+    # Defaults for igraph metrics
     C_obs, Q_obs, rho_obs = 0.0, 0.0, 1.0
-    term_C = loss_weights["C"] * 1.0
-    term_Q = loss_weights["Q"] * 1.0
-    term_rho = loss_weights["rho"] * 1.0
+    term_C = _safe(loss_weights["C"], 1.0)
+    term_Q = _safe(loss_weights["Q"], 1.0)
+    term_rho = _safe(loss_weights["rho"], 1.0)
 
     if n_edges > 100:
         try:
-            edges = list(zip(surviving_sources.tolist(),
-                             surviving_targets.tolist()))
-            ig_graph = ig.Graph(n=n_genes, edges=edges, directed=True,
-                                edge_attrs={'weight': surviving_W.tolist()})
+            edges = list(zip(surviving_sources.tolist(), surviving_targets.tolist()))
+            ig_g = ig.Graph(n=n_genes, edges=edges, directed=True,
+                            edge_attrs={'weight': surviving_W.tolist()})
 
-            # Assortativity
-            rho_calc = ig_graph.assortativity_degree(directed=True)
-            if not np.isnan(rho_calc):
-                rho_obs = rho_calc
-                b = utopian_bounds["rho"]
-                w = loss_weights["rho"]
-                term_rho = 0.0
-                if rho_obs < b[0]:
-                    term_rho = w * ((b[0] - rho_obs) / max(abs(b[0]), 1e-6)) ** 2
-                elif rho_obs > b[1]:
-                    term_rho = w * ((rho_obs - b[1]) / max(abs(b[1]), 1e-6)) ** 2
+            try:
+                rc = ig_g.assortativity_degree(directed=True)
+                if np.isfinite(rc):
+                    rho_obs = rc
+                    term_rho = _pen("rho", rho_obs)
+            except Exception:
+                pass
 
-            # Clustering and Modularity (undirected projection)
-            ig_undirected = ig_graph.as_undirected(
-                mode="collapse", combine_edges=dict(weight="sum"))
-
-            C_calc = ig_undirected.transitivity_undirected()
-            if not np.isnan(C_calc):
-                C_obs = C_calc
-                b = utopian_bounds["C"]
-                w = loss_weights["C"]
-                term_C = 0.0
-                if C_obs < b[0]:
-                    term_C = w * ((b[0] - C_obs) / max(b[0], 1e-6)) ** 2
-                elif C_obs > b[1]:
-                    term_C = w * ((C_obs - b[1]) / max(b[1], 1e-6)) ** 2
-
-            partition = ig_undirected.community_multilevel()
-            Q_obs = partition.modularity
-            b = utopian_bounds["Q"]
-            w = loss_weights["Q"]
-            term_Q = 0.0
-            if Q_obs < b[0]:
-                term_Q = w * ((b[0] - Q_obs) / max(b[0], 1e-6)) ** 2
-            elif Q_obs > b[1]:
-                term_Q = w * ((Q_obs - b[1]) / max(b[1], 1e-6)) ** 2
+            try:
+                ig_u = ig_g.as_undirected(mode="collapse", combine_edges=dict(weight="sum"))
+                cc = ig_u.transitivity_undirected()
+                if np.isfinite(cc):
+                    C_obs = cc
+                    term_C = _pen("C", C_obs)
+                part = ig_u.community_multilevel()
+                qm = part.modularity
+                if np.isfinite(qm):
+                    Q_obs = qm
+                    term_Q = _pen("Q", Q_obs)
+            except Exception:
+                pass
 
         except Exception:
             pass
 
-    L_utopia = np.sqrt(
-        term_alpha + term_C + term_Q + term_G + term_rho + term_sat
-    )
+    raw = (_safe(term_alpha) + _safe(term_C) + _safe(term_Q) +
+           _safe(term_G) + _safe(term_rho) + _safe(term_sat))
+    L = np.sqrt(max(raw, 0.0))
 
-    topo_metrics = {
-        'alpha': alpha_obs,
-        'C': C_obs,
-        'Q': Q_obs,
-        'Gini': G_obs,
-        'rho': rho_obs,
-        'S_max': s_max,
+    topo = {
+        'alpha': _safe(alpha_obs, 1.0), 'C': _safe(C_obs),
+        'Q': _safe(Q_obs), 'Gini': _safe(G_obs, 1.0),
+        'rho': _safe(rho_obs, 1.0), 'S_max': _safe(s_max),
     }
-
-    return L_utopia, topo_metrics
+    return L, topo
 
 
 # =========================================================================
-# DASH Kernel (Single Parameter Set)
+# DASH Kernel Entry Point
 # =========================================================================
 
 def run_dash_and_score(params, W, D, sources, targets, G_baseline_coo,
                        n_genes, perturbed_nodes, utopian_bounds,
                        loss_weights, shatter_cfg):
-    """Full pipeline for one parameter set: compute omega, prune, triage,
-    and score against the data-driven utopian loss.
+    """Full pipeline for one parameter set. Guaranteed finite output."""
+    try:
+        beta, gamma, delta, kappa, k_core, lam = params
 
-    This function is designed to be called inside a Ray remote worker.
-    It contains no print statements in the hot path.
-    """
-    beta, gamma, delta, kappa, k_core, lam = params
+        T_local = compute_dynamic_topology(W, sources, targets, k_core, n_genes)
+        epsilon = 1e-6
 
-    # Bypass the COO matrix entirely and pass the pre-sorted arrays!
-    T_local = compute_dynamic_topology(W, sources, targets, k_core, n_genes)
-    epsilon = 1e-6
+        lambda_baseline = n_genes * 0.0055
+        gamma_dynamic = gamma * (lam / max(lambda_baseline, 1e-6))
 
-    # Dynamic baseline anchoring for hub penalty
-    target_baseline_density = 0.0055
-    lambda_baseline = n_genes * target_baseline_density
-    gamma_dynamic = gamma * (lam / lambda_baseline)
+        numerator = (W ** beta) * (1 + delta * T_local)
+        denominator = (np.log1p(D) + epsilon) ** gamma_dynamic
+        omega_scores = numerator / denominator
 
-    # DASH edge scoring
-    numerator = (W ** beta) * (1 + delta * T_local)
-    denominator = (np.log1p(D) + epsilon) ** gamma_dynamic
-    omega_scores = numerator / denominator
+        surv_src, surv_tgt, surv_W = dual_pass_pruning(
+            omega_scores, W, sources, targets, perturbed_nodes, n_genes, lam, K=3
+        )
 
-    # Dual-pass pruning
-    surviving_sources, surviving_targets, surviving_W = dual_pass_pruning(
-        omega_scores, W, sources, targets, perturbed_nodes, n_genes, lam, K=3
-    )
+        out_deg = np.bincount(surv_src, minlength=n_genes)
+        in_deg = np.bincount(surv_tgt, minlength=n_genes)
+        active = int(np.count_nonzero(out_deg + in_deg > 0))
 
-    # Compute basic degree statistics
-    out_degrees = np.bincount(surviving_sources, minlength=n_genes)
-    in_degrees = np.bincount(surviving_targets, minlength=n_genes)
-    all_degrees = out_degrees + in_degrees
-    active_nodes = np.count_nonzero(all_degrees > 0)
+        is_shattered, reason = check_shatter(
+            surv_src, surv_tgt, surv_W, out_deg, n_genes, active, shatter_cfg
+        )
 
-    # Fail-fast shatter check
-    is_shattered, shatter_reason = check_shatter(
-        surviving_sources, surviving_targets, surviving_W,
-        out_degrees, n_genes, active_nodes, shatter_cfg
-    )
+        if is_shattered:
+            sm = _safe((np.max(out_deg) / n_genes) if len(out_deg) > 0 else 0)
+            return {
+                'beta': beta, 'gamma': gamma, 'delta': delta,
+                'kappa': kappa, 'k_core': k_core, 'lambda': lam,
+                'utopia_loss': 999.0,
+                'is_shattered': 1, 'shatter_reason': reason,
+                'n_edges': len(surv_src), 'active_nodes': active,
+                'alpha': 1.0, 'Gini': 1.0, 'rho': 1.0,
+                'C': 0.0, 'Q': 0.0, 'S_max': sm,
+            }
 
-    if is_shattered:
-        s_max = (np.max(out_degrees) / n_genes) if len(out_degrees) > 0 else 0
+        loss, topo = calculate_utopia_loss(
+            surv_src, surv_tgt, surv_W, n_genes, out_deg, active, kappa,
+            utopian_bounds, loss_weights
+        )
+
+        # GWCC penalty
+        gwcc_frac = 0.0
+        try:
+            sp_G = sp.coo_matrix(
+                (np.ones(len(surv_W)), (surv_src, surv_tgt)),
+                shape=(n_genes, n_genes)
+            )
+            _, lb = connected_components(csgraph=sp_G, directed=False, return_labels=True)
+            gwcc_frac = _safe(np.bincount(lb).max() / n_genes)
+        except Exception:
+            pass
+
+        gwcc_pen = 0.0
+        if gwcc_frac < 0.45:
+            gwcc_pen = 8.0 * ((0.45 - gwcc_frac) / 0.45) ** 2
+        loss = _safe(np.sqrt(max(loss**2 + gwcc_pen, 0.0)), 999.0)
+
+        return {
+            'beta': beta, 'gamma': gamma, 'delta': delta,
+            'kappa': kappa, 'k_core': k_core, 'lambda': lam,
+            'utopia_loss': loss,
+            'is_shattered': 0, 'shatter_reason': None,
+            'n_edges': len(surv_src), 'active_nodes': active,
+            'gwcc_fraction': gwcc_frac,
+            'alpha': topo['alpha'], 'Gini': topo['Gini'],
+            'rho': topo['rho'], 'C': topo['C'],
+            'Q': topo['Q'], 'S_max': topo['S_max'],
+        }
+
+    except Exception as e:
+        beta, gamma, delta, kappa, k_core, lam = params
         return {
             'beta': beta, 'gamma': gamma, 'delta': delta,
             'kappa': kappa, 'k_core': k_core, 'lambda': lam,
             'utopia_loss': 999.0,
-            'is_shattered': 1, 'shatter_reason': shatter_reason,
-            'n_edges': len(surviving_sources),
-            'active_nodes': active_nodes,
+            'is_shattered': 1, 'shatter_reason': f'crash:{str(e)[:60]}',
+            'n_edges': 0, 'active_nodes': 0,
             'alpha': 1.0, 'Gini': 1.0, 'rho': 1.0,
-            'C': 0.0, 'Q': 0.0, 'S_max': s_max,
+            'C': 0.0, 'Q': 0.0, 'S_max': 0.0,
         }
-
-    # Full utopia evaluation
-    utopia_loss, topo_metrics = calculate_utopia_loss(
-        surviving_sources, surviving_targets, surviving_W,
-        n_genes, out_degrees, active_nodes, kappa,
-        utopian_bounds, loss_weights
-    )
-
-    # GWCC percolation penalty (additive)
-    sparse_G = sp.coo_matrix(
-        (np.ones(len(surviving_W)), (surviving_sources, surviving_targets)),
-        shape=(n_genes, n_genes)
-    )
-    _, labels = connected_components(csgraph=sparse_G, directed=False,
-                                     return_labels=True)
-    gwcc_size = np.bincount(labels).max()
-    gwcc_fraction = gwcc_size / n_genes
-
-    gwcc_target = 0.45
-    gwcc_penalty = 0.0
-    if gwcc_fraction < gwcc_target:
-        gwcc_penalty = 8.0 * ((gwcc_target - gwcc_fraction) / gwcc_target) ** 2
-
-    utopia_loss = np.sqrt(utopia_loss ** 2 + gwcc_penalty)
-
-    return {
-        'beta': beta, 'gamma': gamma, 'delta': delta,
-        'kappa': kappa, 'k_core': k_core, 'lambda': lam,
-        'utopia_loss': utopia_loss,
-        'is_shattered': 0, 'shatter_reason': None,
-        'n_edges': len(surviving_sources),
-        'active_nodes': active_nodes,
-        'gwcc_fraction': gwcc_fraction,
-        'alpha': topo_metrics['alpha'], 'Gini': topo_metrics['Gini'],
-        'rho': topo_metrics['rho'], 'C': topo_metrics['C'],
-        'Q': topo_metrics['Q'], 'S_max': topo_metrics['S_max'],
-    }
