@@ -86,10 +86,20 @@ def load_graph(filepath):
             edge_attr=True, create_using=nx.DiGraph,
         )
         sparse_mat = nx.to_scipy_sparse_array(G)
+
+    elif filepath.suffix == ".parquet":
+        print("  Detected Parquet format (SPORE native output).")
+        df = pd.read_parquet(filepath)
+        G = nx.from_pandas_edgelist(
+            df, source="source", target="target",
+            edge_attr=True, create_using=nx.DiGraph,
+        )
+        sparse_mat = nx.to_scipy_sparse_array(G)
+
     else:
         raise ValueError(
             f"Unsupported file format: {filepath.suffix}. "
-            "Supported formats are .npz and .csv."
+            "Supported formats are .npz, .csv, and .parquet."
         )
 
     print(f"  Nodes: {G.number_of_nodes():,}")
