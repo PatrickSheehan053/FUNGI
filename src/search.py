@@ -10,6 +10,7 @@ v6.1 changes from v6:
 """
 
 import os
+import glob
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -164,10 +165,7 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
     # =========================================================
     # STATE RECOVERY & CHUNK SLICING (REPLACES OLD CHUNK LOGIC)
     # =========================================================
-    import os
-    import glob
-    import pandas as pd
-
+    
     shard_dir = "data/output/phase3_expansive_search/shards"
     os.makedirs(shard_dir, exist_ok=True)
 
