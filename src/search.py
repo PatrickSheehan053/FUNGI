@@ -105,19 +105,22 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
             shatter_cfg, n_workers
         )
 
+    # Force OS-level silence on Ray's background telemetry
+    os.environ["RAY_DISABLE_METRICS_COLLECTION"] = "1"
+    os.environ["RAY_ENABLE_MAC"] = "0"
+
     if not ray.is_initialized():
         ray.init(
             num_cpus=n_workers, 
             ignore_reinit_error=True,
-            include_dashboard=False,  # <--- Kills the dashboard port requirement
+            include_dashboard=False,
             runtime_env={
                 "env_vars": {
                     "OMP_NUM_THREADS": "1",
                     "OPENBLAS_NUM_THREADS": "1",
                     "MKL_NUM_THREADS": "1",
                     "VECLIB_MAXIMUM_THREADS": "1",
-                    "NUMEXPR_NUM_THREADS": "1",
-                    "RAY_DISABLE_METRICS_COLLECTION": "1" # <--- Silences rpc_code: 14
+                    "NUMEXPR_NUM_THREADS": "1"
                 }
             }
         )
@@ -149,29 +152,20 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
 
     @ray.remote
     def _evaluate_chunk(chunk_params, W_r, D_r, src_r, tgt_r,
-                        coo_data_r, coo_row_r, coo_col_r,
                         ng, pert_r, bounds_r, weights_r, shatter_r,
                         src_dir):
-        """Evaluates a chunk of parameter sets inside a Ray worker.
-
-        NOTE: Ray auto-resolves ObjectRef arguments. Do NOT call ray.get()
-        on them -- they are already numpy arrays when this function runs.
-        """
+        """Evaluates a chunk of parameter sets inside a Ray worker."""
         import sys
         if src_dir not in sys.path:
             sys.path.insert(0, src_dir)
 
         from engine import run_dash_and_score
-        import scipy.sparse as _sp
-
-        _coo = _sp.coo_matrix(
-            (coo_data_r, (coo_row_r, coo_col_r)), shape=(ng, ng)
-        )
 
         results = []
         for params in chunk_params:
+            # We pass None for the old G_baseline_coo argument since the new engine bypasses it!
             result = run_dash_and_score(
-                params, W_r, D_r, src_r, tgt_r, _coo, ng, pert_r,
+                params, W_r, D_r, src_r, tgt_r, None, ng, pert_r,
                 bounds_r, weights_r, shatter_r
             )
             results.append(result)
@@ -183,6 +177,7 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
     
     all_results = []
     completed_chunks = 0
+    graphs_completed = 0  
     n_total = len(param_list)
     
     if shard_dir is not None:
