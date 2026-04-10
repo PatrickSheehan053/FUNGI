@@ -19,7 +19,12 @@ search using Gaussian perturbation with adaptive step sizes.
 
 import numpy as np
 import pandas as pd
+import warnings
+from botorch.exceptions.warnings import InputDataWarning
 
+# Silence the obnoxious BoTorch standardization warnings
+warnings.filterwarnings("ignore", category=InputDataWarning)
+warnings.filterwarnings("ignore", message=".*Input data is not standardized.*")
 
 def _try_import_botorch():
     """Attempts to import botorch and its dependencies."""
