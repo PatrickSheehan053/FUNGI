@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from scipy.stats.qmc import Sobol
-
+import glob
+import re
 
 # =========================================================================
 # Hyperparameter Bounds
@@ -163,14 +164,14 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
         return results
 
     # =========================================================
-    # STATE RECOVERY & CHUNK SLICING (REPLACES OLD CHUNK LOGIC)
+    # STATE RECOVERY & CHUNK SLICING
     # =========================================================
-    
+
     shard_dir = "data/output/phase3_expansive_search/shards"
     os.makedirs(shard_dir, exist_ok=True)
 
-    # 1. Look for existing shards
-    existing_shards = glob.glob(os.path.join(shard_dir, "chunk_*_results.csv"))
+    # 1. Look for existing shards (matches 'shard_00001.csv' etc.)
+    existing_shards = glob.glob(os.path.join(shard_dir, "shard_*.csv"))
     
     all_results = []
     completed_chunks = 0
@@ -178,12 +179,14 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
     
     if existing_shards:
         print(f"Found {len(existing_shards)} existing shards. Recovering state...")
-        # Sort to ensure they are read in the correct order (by chunk index)
-        try:
-            existing_shards = sorted(existing_shards, key=lambda x: int(os.path.basename(x).split('_')[1]))
-        except Exception:
-            pass # Fallback if naming convention slightly differs
+        
+        # Sort them numerically by extracting the integer from the filename
+        def extract_num(f):
+            match = re.search(r'\d+', os.path.basename(f))
+            return int(match.group()) if match else 0
             
+        existing_shards = sorted(existing_shards, key=extract_num)
+        
         for shard_file in existing_shards:
             df_shard = pd.read_csv(shard_file)
             all_results.extend(df_shard.to_dict('records')) 
@@ -206,20 +209,13 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
         remaining_params[i:i + chunk_size]
         for i in range(0, len(remaining_params), chunk_size)
     ]
-    n_chunks = len(chunks)
 
-    print(f"Dispatching {n_chunks} remaining chunks ({chunk_size} graphs each) "
+    print(f"Dispatching {len(chunks)} remaining chunks ({chunk_size} graphs each) "
           f"across {n_workers} workers...")
 
-    print(f"Dispatching {n_chunks} chunks ({chunk_size} graphs each) "
-          f"across {n_workers} workers...")
-
-    # Set up disk sharding
-    if shard_dir is None:
-        shard_dir = "data/output/phase3_expansive_search/shards"
-    os.makedirs(shard_dir, exist_ok=True)
-
-    # Submit all tasks
+    # =========================================================
+    # RAY DISPATCH & ITERATIVE SAVING
+    # =========================================================
     futures = [
         _evaluate_chunk.remote(
             chunk, W_ref, D_ref, sources_ref, targets_ref,
@@ -230,31 +226,22 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
         for chunk in chunks
     ]
 
-    # Collect with progress tracking and disk sharding
-    all_results = []
-    completed = 0
-
     while futures:
         done, futures = ray.wait(futures, num_returns=1)
         chunk_results = ray.get(done[0])
-
-        # Disk shard: save immediately to survive crashes
+        
+        # Instantly save this chunk to the hard drive with zero-padded names
         shard_df = pd.DataFrame(chunk_results)
-        shard_file = os.path.join(shard_dir, f"shard_{completed:05d}.csv")
+        shard_file = os.path.join(shard_dir, f"shard_{completed_chunks:05d}.csv")
         shard_df.to_csv(shard_file, index=False)
 
         all_results.extend(chunk_results)
-        completed += 1
+        completed_chunks += 1
+        
+        if completed_chunks % 5 == 0 or not futures:
+            print(f"  Progress: {completed_chunks} chunks completed "
+                  f"({len(all_results):,}/{n_total:,} graphs)")
 
-        if completed % 10 == 0 or completed == n_chunks:
-            n_nan = sum(1 for r in all_results
-                        if r.get("utopia_loss") is None
-                        or not np.isfinite(r.get("utopia_loss", float("nan"))))
-            print(f"  Progress: {completed}/{n_chunks} chunks "
-                  f"({len(all_results):,}/{n_total:,} graphs) "
-                  f"[{n_nan} NaN losses]")
-
-    print(f"Search complete. {len(all_results):,} total evaluations.")
     return pd.DataFrame(all_results)
 
 
