@@ -34,61 +34,64 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # Dynamic Topology (Per-Edge T_local from Feed-Forward Loops)
 # =========================================================================
 
-import graphblas as gb
-
-def compute_dynamic_topology(G_baseline_coo, k_core, n_genes):
-
-    """
-    Calculates per-edge local motif participation ratio (T_local) using GraphBLAS.
-    
-    The k_core parameter represents the average degree of the topological
-    core.  Core edge budget scales linearly: target_edges = n * k_core.
-    T_local(u,v) = z_uv / min(d_out(u), d_in(v)), measuring what fraction
-    of a node's local neighborhood participates in feed-forward loops.
-    """
-
+def compute_dynamic_topology(W_sorted, sources_sorted, targets_sorted, k_core, n_genes):
+    """Calculates T_local using 100% GraphBLAS and 1D NumPy Binary Searches."""
     target_edges = int(n_genes * k_core)
-    target_edges = min(target_edges, len(G_baseline_coo.data))
-
+    target_edges = min(target_edges, len(W_sorted))
+    
+    T_local = np.zeros(len(W_sorted), dtype=np.float64)
     if target_edges < 1:
-        return np.zeros(len(G_baseline_coo.data), dtype=np.float64)
+        return T_local
 
-    surviving_indices = np.argpartition(
-        G_baseline_coo.data, -target_edges
-    )[-target_edges:]
+    core_rows = sources_sorted[:target_edges]
+    core_cols = targets_sorted[:target_edges]
 
-    core_rows = G_baseline_coo.row[surviving_indices]
-    core_cols = G_baseline_coo.col[surviving_indices]
-
-    # 1. Build the highly-optimized GraphBLAS Matrix
+    # 1. Build GraphBLAS Matrix
     A_core_gb = gb.Matrix.from_coo(
-        core_rows, core_cols, np.ones(target_edges, dtype=np.float64),
+        core_rows, core_cols, np.ones(target_edges, dtype=np.float64), 
         nrows=n_genes, ncols=n_genes
     )
 
-    # 2. The Bare-Metal Masked FFL Calculation (No intermediate memory explosion!)
-    # Using the plus_times semiring with a structural mask
+    # 2. Bare-Metal Masked FFL Calculation
     T_matrix_gb = gb.semiring.plus_times(A_core_gb @ A_core_gb).new(mask=A_core_gb.S)
 
-    # 3. Extract the results back to fast NumPy arrays
-    t_rows, t_cols, t_vals = T_matrix_gb.to_coo()
+    # 3. Native GraphBLAS Reductions for Degrees (NO SCIPY!)
+    # Let the C-library sum the rows and columns instantly
+    d_out = np.zeros(n_genes, dtype=np.float64)
+    out_idx, out_vals = A_core_gb.reduce_rowwise(gb.monoid.plus).new().to_coo()
+    d_out[out_idx] = out_vals
 
-    # 4. O(1) Coordinate mapping via temporary SciPy CSR
-    T_sp = sp.csr_matrix((t_vals, (t_rows, t_cols)), shape=(n_genes, n_genes))
-    z_values = np.array(T_sp[core_rows, core_cols]).ravel()
+    d_in = np.zeros(n_genes, dtype=np.float64)
+    in_idx, in_vals = A_core_gb.reduce_columnwise(gb.monoid.plus).new().to_coo()
+    d_in[in_idx] = in_vals
 
-    # Local motif participation ratio
-    A_core_sp = sp.csr_matrix((np.ones(target_edges), (core_rows, core_cols)), shape=(n_genes, n_genes))
-    d_out = np.array(A_core_sp.sum(axis=1)).ravel()
-    d_in = np.array(A_core_sp.sum(axis=0)).ravel()
-
-    T_local = np.zeros(len(G_baseline_coo.data), dtype=np.float64)
-    local_cap = np.minimum(d_out[core_rows], d_in[core_cols])
+    # 4. Lightning-Fast 1D Flat Index Mapping (NO SCIPY!)
+    t_rows, t_cols, z_values = T_matrix_gb.to_coo()
     
-    valid = (z_values > 0) & (local_cap > 0)
-    T_local[surviving_indices[valid]] = z_values[valid] / local_cap[valid]
+    if len(z_values) > 0:
+        # Compress 2D coordinates into 1D flat indices for instant lookups
+        core_flat = core_rows.astype(np.int64) * n_genes + core_cols
+        t_flat = t_rows.astype(np.int64) * n_genes + t_cols
+        
+        # GraphBLAS outputs in sorted order, so a binary search takes microseconds
+        sort_idx = np.searchsorted(t_flat, core_flat)
+        
+        # Protect against out-of-bounds indices
+        valid_idx = np.clip(sort_idx, 0, len(t_flat) - 1)
+        valid_mask = (t_flat[valid_idx] == core_flat)
+        
+        mapped_z = np.zeros(target_edges, dtype=np.float64)
+        mapped_z[valid_mask] = z_values[valid_idx[valid_mask]]
+    else:
+        mapped_z = np.zeros(target_edges, dtype=np.float64)
 
+    # 5. Calculate Local Motif Participation
+    local_cap = np.minimum(d_out[core_rows], d_in[core_cols])
+    valid = (mapped_z > 0) & (local_cap > 0)
+    
+    T_local[:target_edges][valid] = mapped_z[valid] / local_cap[valid]
     np.clip(T_local, 0.0, 1.0, out=T_local)
+    
     return T_local
 
 # =========================================================================
@@ -364,8 +367,8 @@ def run_dash_and_score(params, W, D, sources, targets, G_baseline_coo,
     """
     beta, gamma, delta, kappa, k_core, lam = params
 
-    # Compute feed-forward loop support
-    T_local = compute_dynamic_topology(G_baseline_coo, k_core, n_genes)
+    # Bypass the COO matrix entirely and pass the pre-sorted arrays!
+    T_local = compute_dynamic_topology(W, sources, targets, k_core, n_genes)
     epsilon = 1e-6
 
     # Dynamic baseline anchoring for hub penalty
