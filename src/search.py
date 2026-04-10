@@ -106,7 +106,21 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
         )
 
     if not ray.is_initialized():
-        ray.init(num_cpus=n_workers, ignore_reinit_error=True)
+        ray.init(
+            num_cpus=n_workers, 
+            ignore_reinit_error=True,
+            include_dashboard=False,  # <--- Kills the dashboard port requirement
+            runtime_env={
+                "env_vars": {
+                    "OMP_NUM_THREADS": "1",
+                    "OPENBLAS_NUM_THREADS": "1",
+                    "MKL_NUM_THREADS": "1",
+                    "VECLIB_MAXIMUM_THREADS": "1",
+                    "NUMEXPR_NUM_THREADS": "1",
+                    "RAY_DISABLE_METRICS_COLLECTION": "1" # <--- Silences rpc_code: 14
+                }
+            }
+        )
 
     print(f"Ray initialized with {n_workers} workers.")
 
@@ -166,43 +180,38 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
     # =========================================================
     # STATE RECOVERY & CHUNK SLICING
     # =========================================================
-
-    shard_dir = "data/output/phase3_expansive_search/shards"
-    os.makedirs(shard_dir, exist_ok=True)
-
-    # 1. Look for existing shards (matches 'shard_00001.csv' etc.)
-    existing_shards = glob.glob(os.path.join(shard_dir, "shard_*.csv"))
     
     all_results = []
     completed_chunks = 0
     n_total = len(param_list)
     
-    if existing_shards:
-        print(f"Found {len(existing_shards)} existing shards. Recovering state...")
+    if shard_dir is not None:
+        os.makedirs(shard_dir, exist_ok=True)
+        existing_shards = glob.glob(os.path.join(shard_dir, "shard_*.csv"))
         
-        # Sort them numerically by extracting the integer from the filename
-        def extract_num(f):
-            match = re.search(r'\d+', os.path.basename(f))
-            return int(match.group()) if match else 0
+        if existing_shards:
+            print(f"Found {len(existing_shards)} existing shards. Recovering state...")
+            def extract_num(f):
+                match = re.search(r'\d+', os.path.basename(f))
+                return int(match.group()) if match else 0
+            existing_shards = sorted(existing_shards, key=extract_num)
             
-        existing_shards = sorted(existing_shards, key=extract_num)
-        
-        for shard_file in existing_shards:
-            df_shard = pd.read_csv(shard_file)
-            all_results.extend(df_shard.to_dict('records')) 
-            completed_chunks += 1
-            
-    graphs_completed = len(all_results)
-    
-    if graphs_completed > 0:
-        print(f"Recovered {graphs_completed:,} previously evaluated graphs. Resuming search...")
+            for shard_file in existing_shards:
+                df_shard = pd.read_csv(shard_file)
+                all_results.extend(df_shard.to_dict('records')) 
+                completed_chunks += 1
+                
+        graphs_completed = len(all_results)
+        if graphs_completed > 0:
+            print(f"Recovered {graphs_completed:,} previously evaluated graphs. Resuming search...")
 
-    # 2. Slice the param list to remove the ones we already did
-    remaining_params = param_list[graphs_completed:]
-    
-    if len(remaining_params) == 0:
-        print("All graphs already evaluated! Returning recovered results.")
-        return pd.DataFrame(all_results)
+        remaining_params = param_list[graphs_completed:]
+        if len(remaining_params) == 0:
+            print("All graphs already evaluated! Returning recovered results.")
+            return pd.DataFrame(all_results)
+    else:
+        # If shard_dir is None, skip recovery (TuRBO mode)
+        remaining_params = param_list
 
     # 3. Create chunks from the REMAINING params
     chunks = [
@@ -210,38 +219,49 @@ def execute_search_ray(param_list, W_arr, D_arr, sources_arr, targets_arr,
         for i in range(0, len(remaining_params), chunk_size)
     ]
 
-    print(f"Dispatching {len(chunks)} remaining chunks ({chunk_size} graphs each) "
+    print(f"Dispatching {len(chunks)} chunks ({chunk_size} graphs each) "
           f"across {n_workers} workers...")
 
     # =========================================================
-    # RAY DISPATCH & ITERATIVE SAVING
+    # RAY DISPATCH & ITERATIVE SAVING WITH TQDM
     # =========================================================
+    from tqdm.auto import tqdm
+
     futures = [
         _evaluate_chunk.remote(
             chunk, W_ref, D_ref, sources_ref, targets_ref,
-            coo_data_ref, coo_row_ref, coo_col_ref,
             n_genes, pert_ref, bounds_ref, weights_ref, shatter_ref,
             _src_dir
         )
         for chunk in chunks
     ]
 
+    # Initialize the beautiful progress bar
+    pbar = tqdm(
+        total=n_total, 
+        initial=graphs_completed, 
+        desc="Expansive Search", 
+        unit="graph",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+    )
+
     while futures:
         done, futures = ray.wait(futures, num_returns=1)
         chunk_results = ray.get(done[0])
         
-        # Instantly save this chunk to the hard drive with zero-padded names
-        shard_df = pd.DataFrame(chunk_results)
-        shard_file = os.path.join(shard_dir, f"shard_{completed_chunks:05d}.csv")
-        shard_df.to_csv(shard_file, index=False)
+        # Instantly save this chunk to the hard drive if applicable
+        if shard_dir is not None:
+            shard_df = pd.DataFrame(chunk_results)
+            shard_file = os.path.join(shard_dir, f"shard_{completed_chunks:05d}.csv")
+            shard_df.to_csv(shard_file, index=False)
 
         all_results.extend(chunk_results)
         completed_chunks += 1
         
-        if completed_chunks % 5 == 0 or not futures:
-            print(f"  Progress: {completed_chunks} chunks completed "
-                  f"({len(all_results):,}/{n_total:,} graphs)")
+        # Smoothly update the progress bar with the number of graphs just finished
+        pbar.update(len(chunk_results))
 
+    pbar.close()
     return pd.DataFrame(all_results)
 
 
