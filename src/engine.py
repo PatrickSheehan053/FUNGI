@@ -334,12 +334,24 @@ def run_dash_and_score(params, W, D, sources, targets, G_baseline_coo,
         lambda_baseline = n_genes * 0.0055
         gamma_dynamic = gamma * (lam / max(lambda_baseline, 1e-6))
 
-        numerator = (W ** beta) * (1 + delta * T_local)
-        denominator = (np.log1p(D) + epsilon) ** gamma_dynamic
+        # --- SPEED FIX: Array Truncation ---
+        # Density collapse kills graphs > 500k edges. Truncating to N_eval
+        # completely bypasses the 5.1M element argpartition bottleneck.
+        N_max = shatter_cfg.get("max_edge_count", 500000)
+        N_eval = min(len(W), N_max + 10000)
+
+        W_sub = W[:N_eval]
+        D_sub = D[:N_eval]
+        src_sub = sources[:N_eval]
+        tgt_sub = targets[:N_eval]
+        T_sub = T_local[:N_eval]
+
+        numerator = (W_sub ** beta) * (1 + delta * T_sub)
+        denominator = (np.log1p(D_sub) + epsilon) ** gamma_dynamic
         omega_scores = numerator / denominator
 
         surv_src, surv_tgt, surv_W = dual_pass_pruning(
-            omega_scores, W, sources, targets, perturbed_nodes, n_genes, lam, K=3
+            omega_scores, W_sub, src_sub, tgt_sub, perturbed_nodes, n_genes, lam, K=3
         )
 
         out_deg = np.bincount(surv_src, minlength=n_genes)
