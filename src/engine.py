@@ -282,14 +282,18 @@ def calculate_utopia_loss(surviving_sources, surviving_targets, surviving_W,
             return w * ((o - b[1]) / max(abs(b[1]), 1e-6)) ** 2
         return 0.0
 
-    # Alpha
+    # Alpha (with right-censoring correction for the S_max hard cap)
+    # Nodes sitting at the hard cap have artificially truncated degrees.
+    # Including them distorts the MLE toward steep exponents. We exclude
+    # any node whose degree equals the cap value before fitting.
     alpha_obs = 1.0
     try:
-        if len(out_degrees) > 10 and np.max(out_degrees) > 1:
-            unique_deg = np.unique(out_degrees[out_degrees > 0])
+        cap = int(n_genes * 0.15)  # matches the hard cap in dual_pass_pruning
+        clean_deg = out_degrees[(out_degrees > 0) & (out_degrees < cap)]
+        if len(clean_deg) > 10:
+            unique_deg = np.unique(clean_deg)
             if len(unique_deg) >= 3:
-                fit = powerlaw.Fit(out_degrees[out_degrees > 0],
-                                   xmin=1, discrete=True, verbose=False)
+                fit = powerlaw.Fit(clean_deg, xmin=1, discrete=True, verbose=False)
                 alpha_obs = _safe(fit.power_law.alpha, 1.0)
     except Exception:
         pass
