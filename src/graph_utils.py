@@ -1,8 +1,14 @@
 """
-FUNGI v6 -- Graph loading, structural metrics, and topology utilities.
+FUNGI v7.1 -- Graph loading, structural metrics, and topology utilities.
 
-Expanded from v5 to include spectral gap computation and spatial coherence
-(Moran's I) for the upgraded shatter criteria.
+v7.1 fix: _load_edge_list now renames the detected weight column to 'weight'
+before constructing the NetworkX graph. This ensures nx.to_scipy_sparse_array
+picks up the actual continuous importance values instead of defaulting to 1.
+
+Previous bug: nx.from_pandas_edgelist stored edge weights under the parquet's
+column name (e.g. 'Importance'), but nx.to_scipy_sparse_array looks for an
+attribute called 'weight' by default. When it didn't find 'weight', it
+silently assigned 1 to every edge, destroying all LightGBM gain signal.
 """
 
 import numpy as np
@@ -18,14 +24,7 @@ from pathlib import Path
 # -------------------------------------------------------------------------
 
 def _load_npz(filepath):
-    """Handle all .npz variants and return (sparse_mat, genes_or_None).
-
-    Priority order:
-    1. Keys ``adj_matrix`` + ``genes`` -- FUNGI / GuanLab dense format.
-    2. Valid SciPy sparse archive (contains ``format`` key).
-    3. Generic NumPy archive -- use the first 2D array as the adjacency
-       matrix and, if present, a ``genes`` array for node labels.
-    """
+    """Handle all .npz variants and return (sparse_mat, genes_or_None)."""
     loaded = np.load(filepath, allow_pickle=True)
     keys = loaded.files
 
@@ -62,10 +61,104 @@ def _load_npz(filepath):
     return sp.csr_matrix(mat), genes
 
 
+# -------------------------------------------------------------------------
+# Edge-list column auto-detection
+# -------------------------------------------------------------------------
+
+_SOURCE_ALIASES = [
+    "source", "Source", "TF", "tf", "regulator", "Regulator",
+    "gene1", "Gene1", "from", "src", "row",
+]
+_TARGET_ALIASES = [
+    "target", "Target", "gene", "Gene", "gene2", "Gene2",
+    "to", "tgt", "col", "dst",
+]
+_WEIGHT_ALIASES = [
+    "weight", "Weight", "importance", "Importance", "score", "Score",
+    "coef_mean", "coef", "edge_weight", "value",
+]
+
+
+def _detect_edge_columns(df):
+    """Auto-detect source, target, and optional weight columns."""
+    cols = list(df.columns)
+    cols_lower = {c.lower(): c for c in cols}
+
+    def _find(aliases):
+        for alias in aliases:
+            if alias in cols:
+                return alias
+            if alias.lower() in cols_lower:
+                return cols_lower[alias.lower()]
+        return None
+
+    src_col = _find(_SOURCE_ALIASES)
+    tgt_col = _find(_TARGET_ALIASES)
+    wt_col = _find(_WEIGHT_ALIASES)
+
+    if src_col is None or tgt_col is None:
+        if len(cols) == 2:
+            src_col, tgt_col = cols[0], cols[1]
+            wt_col = None
+            print(f"  Positional fallback: source='{src_col}', target='{tgt_col}'")
+        elif len(cols) >= 3:
+            src_col, tgt_col, wt_col = cols[0], cols[1], cols[2]
+            print(f"  Positional fallback: source='{src_col}', target='{tgt_col}', weight='{wt_col}'")
+        else:
+            raise ValueError(
+                f"Cannot auto-detect source/target columns. "
+                f"Available columns: {cols}. "
+                f"Expected one of {_SOURCE_ALIASES[:5]} for source and "
+                f"one of {_TARGET_ALIASES[:5]} for target."
+            )
+
+    return src_col, tgt_col, wt_col
+
+
+def _load_edge_list(df, filepath_name):
+    """Converts an edge-list DataFrame to (nx.DiGraph, scipy CSR matrix).
+
+    v7.1 FIX: If the weight column is not already named 'weight', rename it
+    before passing to nx.from_pandas_edgelist. This ensures the actual edge
+    importance values are stored under the 'weight' attribute that
+    nx.to_scipy_sparse_array expects by default.
+    """
+    src_col, tgt_col, wt_col = _detect_edge_columns(df)
+    print(f"  Columns detected: source='{src_col}', target='{tgt_col}'"
+          + (f", weight='{wt_col}'" if wt_col else ""))
+
+    # Rename the weight column to 'weight' so NetworkX stores it correctly
+    if wt_col is not None and wt_col != "weight":
+        df = df.rename(columns={wt_col: "weight"})
+        print(f"  Renamed '{wt_col}' -> 'weight' for NetworkX compatibility.")
+        wt_col = "weight"
+
+    edge_attr = "weight" if wt_col else None
+    G = nx.from_pandas_edgelist(
+        df, source=src_col, target=tgt_col,
+        edge_attr=edge_attr, create_using=nx.DiGraph,
+    )
+    sparse_mat = nx.to_scipy_sparse_array(G)
+
+    # Verify the weights were actually preserved
+    if wt_col:
+        w_data = sparse_mat.data
+        n_unique = len(np.unique(w_data[:min(10000, len(w_data))]))
+        if n_unique <= 1:
+            print(f"  WARNING: Sparse matrix has only {n_unique} unique weight values!")
+        else:
+            print(f"  Weight range in sparse matrix: [{w_data.min():.4f}, {w_data.max():.4f}]")
+
+    return G, sparse_mat
+
+
 def load_graph(filepath):
     """Load a graph from disk and return (NetworkX DiGraph, scipy CSR matrix).
 
-    Supported formats: .npz, .csv (edge list with source/target columns).
+    Supported formats:
+        .npz      -- NumPy/SciPy adjacency matrix archive
+        .csv      -- Edge list (auto-detects column names)
+        .parquet  -- Edge list (auto-detects column names, SPORE native)
     """
     filepath = Path(filepath)
     print(f"Loading graph from {filepath.name} ...")
@@ -81,20 +174,12 @@ def load_graph(filepath):
 
     elif filepath.suffix == ".csv":
         df = pd.read_csv(filepath)
-        G = nx.from_pandas_edgelist(
-            df, source="source", target="target",
-            edge_attr=True, create_using=nx.DiGraph,
-        )
-        sparse_mat = nx.to_scipy_sparse_array(G)
+        G, sparse_mat = _load_edge_list(df, filepath.name)
 
     elif filepath.suffix == ".parquet":
-        print("  Detected Parquet format (SPORE native output).")
+        print("  Detected Parquet format.")
         df = pd.read_parquet(filepath)
-        G = nx.from_pandas_edgelist(
-            df, source="source", target="target",
-            edge_attr=True, create_using=nx.DiGraph,
-        )
-        sparse_mat = nx.to_scipy_sparse_array(G)
+        G, sparse_mat = _load_edge_list(df, filepath.name)
 
     else:
         raise ValueError(
@@ -128,28 +213,7 @@ def calculate_gini(degree_sequence):
 
 def compute_spectral_dominance_ratio(sources, targets, weights, n_genes,
                                      n_eigenvalues=3):
-    """Computes the ratio lambda_1 / lambda_2 of the graph's adjacency matrix.
-
-    A very large ratio indicates spectral masking: the dominant eigenvalue
-    absorbs all local topological variation, making the graph useless for
-    downstream GNN inference.
-
-    Parameters
-    ----------
-    sources, targets : np.ndarray
-        Edge source and target indices.
-    weights : np.ndarray
-        Edge weights.
-    n_genes : int
-        Total number of nodes.
-    n_eigenvalues : int
-        Number of leading eigenvalues to compute.
-
-    Returns
-    -------
-    float
-        Ratio lambda_1 / lambda_2.  Returns np.inf if lambda_2 is zero.
-    """
+    """Computes the ratio lambda_1 / lambda_2 of the graph's adjacency matrix."""
     if len(sources) < n_eigenvalues + 1:
         return np.inf
 
@@ -157,7 +221,7 @@ def compute_spectral_dominance_ratio(sources, targets, weights, n_genes,
 
     try:
         eigenvalues = splinalg.eigsh(
-            A.T + A,  # symmetrize for real eigenvalues
+            A.T + A,
             k=min(n_eigenvalues, n_genes - 2),
             which='LM',
             return_eigenvectors=False
@@ -178,27 +242,7 @@ def compute_spectral_dominance_ratio(sources, targets, weights, n_genes,
 # -------------------------------------------------------------------------
 
 def compute_morans_i(sources, targets, node_values, n_genes):
-    """Computes Moran's I autocorrelation statistic on the graph.
-
-    Measures whether neighboring genes provide rank-consistent regulatory
-    signals.  A value near zero or negative indicates a "house of cards"
-    topology where node values are uncorrelated with their neighbors.
-
-    Parameters
-    ----------
-    sources, targets : np.ndarray
-        Edge source and target indices.
-    node_values : np.ndarray
-        Per-gene attribute (e.g., out-degree or expression variance).
-    n_genes : int
-        Total number of nodes.
-
-    Returns
-    -------
-    float
-        Moran's I statistic.  Positive = spatially clustered,
-        near zero = random, negative = dispersed.
-    """
+    """Computes Moran's I autocorrelation statistic on the graph."""
     if len(sources) == 0 or n_genes < 3:
         return 0.0
 
@@ -210,9 +254,7 @@ def compute_morans_i(sources, targets, node_values, n_genes):
     if ss < 1e-12:
         return 0.0
 
-    W = len(sources)  # total weight (unweighted: number of edges)
-
-    # Sum of cross-deviation products for connected pairs
+    W = len(sources)
     cross_sum = np.sum(x_dev[sources] * x_dev[targets])
 
     morans_i = (n_genes / W) * (cross_sum / ss)
