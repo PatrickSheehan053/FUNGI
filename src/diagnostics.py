@@ -155,7 +155,7 @@ def _diagnose_alpha(impact_array, n_bootstrap):
 
     try:
         import powerlaw
-        fit = powerlaw.Fit(impact_array, discrete=True, verbose=False)
+        fit = powerlaw.Fit(impact_array, xmin=2, discrete=True, verbose=False)
 
         alpha_est = _safe_float(fit.power_law.alpha, 2.3)
         sigma_est = _safe_float(fit.power_law.sigma, 0.5)
@@ -221,91 +221,134 @@ def _diagnose_smax(impact_array, n_genes, is_metacell, metacell_pooling_factor):
 def _diagnose_modularity_and_clustering(adata, perturbation_column,
                                         control_label, knn_k_range,
                                         is_metacell, sc_midpoint, mc_midpoint):
-    """Modularity (Q) and clustering (C) from phenotypic clustering."""
-    print("  Computing perturbation centroids for modularity diagnostics...")
+    """Q and C from cosine similarity of continuous LFC vectors.
+    
+    Replaces KNN centroid approach (KNN fallacy: artificially inflated C).
+    Builds a co-impact graph over active perturbations using cosine similarity
+    of full LFC vectors, then measures Q and C on that graph.
+    
+    C is attenuated by the fraction of active regulators in the network
+    (per Aguirre 2025: ~41% of genes have measurable perturbation effects)
+    to produce a realistic global C target for the full n-gene GRN.
+    Q is used directly as it is relatively scale-invariant.
+    """
+    print("  Computing LFC cosine similarity graph for modularity diagnostics...")
 
     try:
         conditions = adata.obs[perturbation_column].unique()
         conditions = [c for c in conditions if c != control_label]
 
-        centroids = []
+        # Compute mean LFC vector for each perturbation vs control
+        ctrl_mask = adata.obs[perturbation_column] == control_label
+        if ctrl_mask.sum() < 5:
+            raise ValueError("Too few control cells.")
+
+        if hasattr(adata.X, 'toarray'):
+            ctrl_mean = np.array(adata.X[ctrl_mask].toarray().mean(axis=0)).ravel()
+        else:
+            ctrl_mean = np.array(adata.X[ctrl_mask].mean(axis=0)).ravel()
+
+        lfc_vectors = []
         valid_conditions = []
+
         for cond in conditions:
             mask = adata.obs[perturbation_column] == cond
             if mask.sum() < 5:
                 continue
-            subset = adata[mask]
-            if hasattr(subset.X, 'toarray'):
-                centroid = np.array(subset.X.toarray().mean(axis=0)).ravel()
+            if hasattr(adata.X, 'toarray'):
+                cond_mean = np.array(adata.X[mask].toarray().mean(axis=0)).ravel()
             else:
-                centroid = np.array(subset.X.mean(axis=0)).ravel()
-            if np.all(np.isfinite(centroid)):
-                centroids.append(centroid)
+                cond_mean = np.array(adata.X[mask].mean(axis=0)).ravel()
+
+            # Log fold change: log1p(cond) - log1p(ctrl)
+            lfc = np.log1p(np.maximum(cond_mean, 0)) - np.log1p(np.maximum(ctrl_mean, 0))
+
+            if np.all(np.isfinite(lfc)) and np.any(lfc != 0):
+                lfc_vectors.append(lfc)
                 valid_conditions.append(cond)
 
-        if len(centroids) < 10:
-            print("  WARNING: Too few valid perturbations for modularity diagnostics.")
+        if len(lfc_vectors) < 10:
             fb_q = FALLBACK_BOUNDS["Q"]
             fb_c = FALLBACK_BOUNDS["C"]
             return fb_q[0], fb_q[1], FALLBACK_CONFIDENCE, fb_c[0], fb_c[1], FALLBACK_CONFIDENCE
 
-        centroid_matrix = np.array(centroids)
+        lfc_matrix = np.array(lfc_vectors)  # shape: (n_perts, n_genes)
+        n_perts = len(lfc_matrix)
 
+        # Cosine similarity matrix
+        norms = np.linalg.norm(lfc_matrix, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-10, 1e-10, norms)
+        lfc_normed = lfc_matrix / norms
+        sim_matrix = lfc_normed @ lfc_normed.T  # (n_perts, n_perts)
+        np.fill_diagonal(sim_matrix, 0)
+        # Clip to [0, 1]: negative cosine similarity means antagonistic,
+        # treat as no edge for community detection purposes
+        sim_matrix = np.clip(sim_matrix, 0, 1)
+
+        import networkx as nx
         Q_values = []
         C_values = []
-        silhouette_scores_list = []
 
         for k in knn_k_range:
-            if k >= len(centroids):
+            if k >= n_perts:
                 continue
 
-            knn_adj = kneighbors_graph(centroid_matrix, n_neighbors=k,
-                                       mode='connectivity', include_self=False)
+            G_co = nx.Graph()
+            G_co.add_nodes_from(range(n_perts))
 
-            import networkx as nx
-            G_knn = nx.from_scipy_sparse_array(knn_adj)
+            for i in range(n_perts):
+                top_k_idx = np.argsort(sim_matrix[i])[::-1][:k]
+                for j in top_k_idx:
+                    if sim_matrix[i, j] > 0:
+                        G_co.add_edge(i, j, weight=float(sim_matrix[i, j]))
+
+            if G_co.number_of_edges() == 0:
+                continue
 
             try:
-                communities = nx.community.louvain_communities(G_knn, seed=42)
-                Q = nx.community.modularity(G_knn, communities)
+                communities = nx.community.louvain_communities(G_co, seed=42)
+                Q = nx.community.modularity(G_co, communities)
                 if np.isfinite(Q):
                     Q_values.append(Q)
             except Exception:
                 pass
 
             try:
-                C = nx.average_clustering(G_knn)
+                C = nx.average_clustering(G_co, weight='weight')
                 if np.isfinite(C):
                     C_values.append(C)
             except Exception:
                 pass
 
-            try:
-                if len(communities) >= 2:
-                    labels = np.zeros(len(centroids), dtype=int)
-                    for ci, comm in enumerate(communities):
-                        for node in comm:
-                            labels[node] = ci
-                    if len(set(labels)) >= 2:
-                        sil = silhouette_score(centroid_matrix, labels)
-                        if np.isfinite(sil):
-                            silhouette_scores_list.append(sil)
-            except Exception:
-                pass
+        Q_min = float(min(Q_values)) if Q_values else FALLBACK_BOUNDS["Q"][0]
+        Q_max = float(max(Q_values)) if Q_values else FALLBACK_BOUNDS["Q"][1]
 
-        Q_min = min(Q_values) if Q_values else FALLBACK_BOUNDS["Q"][0]
-        Q_max = max(Q_values) if Q_values else FALLBACK_BOUNDS["Q"][1]
-        C_min = min(C_values) if C_values else FALLBACK_BOUNDS["C"][0]
-        C_max = max(C_values) if C_values else FALLBACK_BOUNDS["C"][1]
+        if C_values:
+            # Attenuation: C measured on the regulatory core (active perturbations)
+            # must be scaled down for the full n-gene network which includes
+            # ~59% terminal effectors with C=0 (Aguirre et al. 2025).
+            # Active fraction ~0.41 is the empirical estimate from Replogle 2022.
+            active_fraction = len(valid_conditions) / max(
+                len(adata.obs[perturbation_column].unique()) - 1, 1)
+            active_fraction = float(np.clip(active_fraction, 0.10, 0.60))
+            C_core = float(np.mean(C_values))
+            C_attenuated = C_core * active_fraction
+            # Build bounds around the attenuated value
+            C_spread = float(np.std(C_values)) * active_fraction
+            C_min = max(0.0, C_attenuated - C_spread)
+            C_max = C_attenuated + C_spread
+        else:
+            C_min = FALLBACK_BOUNDS["C"][0]
+            C_max = FALLBACK_BOUNDS["C"][1]
 
-        mean_sil = float(np.mean(silhouette_scores_list)) if silhouette_scores_list else 0.25
-        midpoint = mc_midpoint if is_metacell else sc_midpoint
-        k_steepness = 8.0
-        sigmoid_val = 1.0 / (1.0 + np.exp(-k_steepness * (mean_sil - midpoint)))
-        Q_confidence = _safe_float(sigmoid_val, FALLBACK_CONFIDENCE)
-        C_confidence = _safe_float(sigmoid_val, FALLBACK_CONFIDENCE)
+        # Confidence from consistency across k values
+        if len(C_values) >= 2:
+            c_cv = np.std(C_values) / max(np.mean(C_values), 1e-6)
+            confidence = float(np.clip(1.0 - c_cv, 0.15, 1.0))
+        else:
+            confidence = FALLBACK_CONFIDENCE
 
-        return Q_min, Q_max, Q_confidence, C_min, C_max, C_confidence
+        return Q_min, Q_max, confidence, C_min, C_max, confidence
 
     except Exception:
         fb_q = FALLBACK_BOUNDS["Q"]
@@ -527,6 +570,15 @@ def run_diagnostics(adata, n_genes, cfg_diagnostics, cfg_input):
     print("  Diagnosing rho (degree assortativity)...")
     rho_min, rho_max, rho_conf, rho_center = _diagnose_rho(
         impact_array, pert_labels, adata, pert_col, ctrl_label, n_genes)
+
+    # Add this block just before the enforce calls in run_diagnostics
+    print("\n  Raw bounds before constraint enforcement:")
+    print(f"    alpha: [{alpha_min:.4f}, {alpha_max:.4f}]  (conf={alpha_conf:.3f})")
+    print(f"    C:     [{C_min:.4f}, {C_max:.4f}]  (conf={C_conf:.3f})")
+    print(f"    Q:     [{Q_min:.4f}, {Q_max:.4f}]  (conf={Q_conf:.3f})")
+    print(f"    gini:  [{gini_min:.4f}, {gini_max:.4f}]  (conf={gini_conf:.3f})")
+    print(f"    S_max: [{smax_min:.4f}, {smax_max:.4f}]  (conf={smax_conf:.3f})")
+    print(f"    rho:   [{rho_min:.4f}, {rho_max:.4f}]  (conf={rho_conf:.3f})")
 
     # Step 3: Enforce bound constraints
     gini_min, gini_max = _enforce_bound_constraints(
