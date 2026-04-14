@@ -642,3 +642,46 @@ def run_diagnostics(adata, n_genes, cfg_diagnostics, cfg_input):
     print(f"{'=' * 72}\n")
 
     return utopian_bounds, loss_weights, diagnostic_report
+
+def build_shatter_config(cfg_shatter, n_genes, utopian_bounds, 
+                          lambda_search_bounds):
+    """
+    Resolves dynamic shatter thresholds from Phase 0 outputs and graph size.
+    Call this after run_diagnostics() and before execute_search_ray().
+    
+    Args:
+        cfg_shatter:        Raw shatter block from fungi_config.yaml
+        n_genes:            Number of genes in the graph (N_GENES)
+        utopian_bounds:     Dict output from run_diagnostics()
+        lambda_search_bounds: [lambda_min_search, lambda_max_search] from
+                              cfg["hyperparameter_bounds"]["lambda_density"]
+    
+    Returns:
+        dict: Fully resolved shatter config ready to pass to engine.py
+    """
+    lambda_min = cfg_shatter.get("lambda_min", 2.0)
+    lambda_max = cfg_shatter.get("lambda_max", 30.0)
+    s_max_mult = cfg_shatter.get("s_max_ceiling_multiplier", 1.5)
+    s_max_cap  = cfg_shatter.get("s_max_ceiling_hard_cap", 0.30)
+    clust_gamma = cfg_shatter.get("min_clustering_gamma", 1.5)
+
+    # Dynamic S_max ceiling: 1.5x Phase 0 upper bound, hard cap at 0.30
+    s_max_ceiling = min(
+        round(utopian_bounds["S_max"][1] * s_max_mult, 4),
+        s_max_cap
+    )
+
+    # Dynamic min_clustering: gamma × random graph expectation
+    # Use midpoint of lambda search space as expected lambda
+    lambda_expected = (lambda_search_bounds[0] + lambda_search_bounds[1]) / 2
+    lambda_expected_abs = lambda_expected * n_genes
+    min_clustering = round(clust_gamma * (lambda_expected_abs / n_genes), 6)
+
+    return {
+        "max_orphan_fraction": cfg_shatter.get("max_orphan_fraction", 0.15),
+        "min_gwcc_fraction":   cfg_shatter.get("min_gwcc_fraction", 0.35),
+        "max_hub_saturation":  s_max_ceiling,
+        "min_edge_count":      int(lambda_min * n_genes),
+        "max_edge_count":      int(lambda_max * n_genes),
+        "min_clustering":      min_clustering,
+    }
