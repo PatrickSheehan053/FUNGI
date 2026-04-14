@@ -104,7 +104,7 @@ def check_shatter(ss, st, sw, od, n, active, cfg):
         try:
             cap = int(n*0.15); cd = od[(od>0)&(od<cap)]
             if len(cd)>10 and len(np.unique(cd))>=3:
-                alpha = _safe(powerlaw.Fit(cd, xmin=1, discrete=True, verbose=False).power_law.alpha, 2.5)
+                alpha = _safe(powerlaw.Fit(cd, xmin=2, discrete=True, verbose=False).power_law.alpha, 2.5)
                 if af is not None and alpha < af: return True, "scale_free_degeneration"
                 if ac is not None and alpha > ac: return True, "scale_free_degeneration"
         except: pass
@@ -122,7 +122,7 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa, ub, lw):
     try:
         cap=int(n*0.15); cd=od[(od>0)&(od<cap)]
         if len(cd)>10 and len(np.unique(cd))>=3:
-            ao = _safe(powerlaw.Fit(cd, xmin=1, discrete=True, verbose=False).power_law.alpha, 1.)
+            ao = _safe(powerlaw.Fit(cd, xmin=2, discrete=True, verbose=False).power_law.alpha, 1.)
     except: pass
     ta = _p("alpha", ao)
     go = 1.0
