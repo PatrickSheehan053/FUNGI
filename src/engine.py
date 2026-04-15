@@ -113,47 +113,119 @@ def check_shatter(ss, st, sw, od, n, active, cfg):
 # ---- Utopia loss ----
 def calculate_utopia_loss(ss, st, sw, n, od, active, kappa, ub, lw):
     ne = len(ss)
+
     def _p(par, obs):
-        b=ub[par]; w=_safe(lw[par],1.); o=_safe(obs,0.)
-        if o<b[0]: return w*((b[0]-o)/max(abs(b[0]),1e-6))**2
-        elif o>b[1]: return w*((o-b[1])/max(abs(b[1]),1e-6))**2
+        b = ub[par]; w = _safe(lw[par], 1.); o = _safe(obs, 0.)
+        if o < b[0]: return w * ((b[0] - o) / max(abs(b[0]), 1e-6)) ** 2
+        elif o > b[1]: return w * ((o - b[1]) / max(abs(b[1]), 1e-6)) ** 2
         return 0.
+
+    # ── Alpha ──────────────────────────────────────────────────────────────
     ao = 1.0
     try:
-        cap=int(n*0.15); cd=od[(od>0)&(od<cap)]
-        if len(cd)>10 and len(np.unique(cd))>=3:
-            ao = _safe(powerlaw.Fit(cd, xmin=2, discrete=True, verbose=False).power_law.alpha, 1.)
+        cap = int(n * 0.15); cd = od[(od > 0) & (od < cap)]
+        if len(cd) > 10 and len(np.unique(cd)) >= 3:
+            ao = _safe(powerlaw.Fit(
+                cd, xmin=2, discrete=True, verbose=False).power_law.alpha, 1.)
     except: pass
     ta = _p("alpha", ao)
+
+    # ── Gini ───────────────────────────────────────────────────────────────
     go = 1.0
     try:
-        if active>1 and np.sum(od)>0:
-            sd=np.sort(od); nn=len(sd)
-            go = _safe((2.*np.sum(np.arange(1,nn+1)*sd))/(nn*np.sum(sd))-(nn+1)/nn, 1.)
+        if active > 1 and np.sum(od) > 0:
+            sd = np.sort(od); nn = len(sd)
+            go = _safe((2. * np.sum(np.arange(1, nn + 1) * sd)) /
+                       (nn * np.sum(sd)) - (nn + 1) / nn, 1.)
     except: pass
     tg = _p("gini", go)
-    smo = _safe((np.max(od)/n) if len(od)>0 else 0)
-    rv = max(0., (smo-kappa)/max(kappa,1e-6))
-    ts = _safe(lw["S_max"],1.) * rv**2
-    co,qo,ro = 0.,0.,1.; tc=_safe(lw["C"],1.); tq=_safe(lw["Q"],1.); tr=_safe(lw["rho"],1.)
+
+    # ── S_max ──────────────────────────────────────────────────────────────
+    smo = _safe((np.max(od) / n) if len(od) > 0 else 0)
+    rv = max(0., (smo - kappa) / max(kappa, 1e-6))
+    ts = _safe(lw["S_max"], 1.) * rv ** 2
+
+    # ── C, Q, Rho ──────────────────────────────────────────────────────────
+    co, qo, ro = 0., 0., 1.
+    tc = _safe(lw["C"], 1.)
+    tq = _safe(lw["Q"], 1.)
+    tr = _safe(lw["rho"], 1.)
+
     if ne > 100:
         try:
             edges = list(zip(ss.tolist(), st.tolist()))
-            ig_g = ig.Graph(n=n, edges=edges, directed=True, edge_attrs={'weight': sw.tolist()})
+            ig_g = ig.Graph(n=n, edges=edges, directed=True,
+                            edge_attrs={'weight': sw.tolist()})
             try:
                 rc = ig_g.assortativity_degree(directed=True)
-                if np.isfinite(rc): ro=rc; tr=_p("rho",ro)
+                if np.isfinite(rc):
+                    ro = rc
+                    # ── Lambda-conditional rho penalty (Molloy-Reed) ──────
+                    # Expected rho for an uncorrelated scale-free network is
+                    # determined by the degree distribution moments. Rather
+                    # than penalizing against a static bound, we compute the
+                    # Molloy-Reed analytical baseline for this graph's current
+                    # lambda and alpha, then only penalize if observed rho is
+                    # worse (less negative) than the baseline expectation.
+                    # This eliminates reward hacking via lambda reduction:
+                    # dropping lambda shifts the baseline too, so the optimizer
+                    # gains no reward from network starvation.
+                    try:
+                        lam_obs = _safe(np.mean(od), 1.)
+                        # Moments of truncated power-law degree distribution
+                        # k_max: structural cutoff for finite network
+                        k_max = max(int(n ** (1. / (ao - 1.))) 
+                                    if ao > 1.05 else int(n * 0.15), 
+                                    int(np.max(od)) if len(od) > 0 else 1)
+                        k_max = min(k_max, int(n * 0.15))
+                        ks = np.arange(1, k_max + 1, dtype=np.float64)
+                        pk = ks ** (-ao)
+                        pk = pk / pk.sum()
+                        k1 = float(np.sum(ks * pk))        # <k>
+                        k2 = float(np.sum(ks ** 2 * pk))   # <k²>
+                        k3 = float(np.sum(ks ** 3 * pk))   # <k³>
+                        if k1 > 1e-6 and k2 > 1e-6 and k3 > 1e-6:
+                            # Newman 2002: rho_baseline ≈ -(k2/k1)² / (k3/k1)
+                            # Normalized to be scale-independent
+                            rho_baseline = _safe(
+                                -(k2 / k1) ** 2 / max(k3 / k1, 1e-6), -0.10)
+                            # Clip to reasonable range
+                            rho_baseline = float(
+                                np.clip(rho_baseline, -0.50, 0.0))
+                        else:
+                            rho_baseline = -0.10
+                    except:
+                        rho_baseline = -0.10
+
+                    # Penalty: only fire if observed rho is WORSE than
+                    # baseline (less negative). If the graph beats the
+                    # Molloy-Reed expectation, no penalty is applied.
+                    # Static utopian bounds act as a soft ceiling only.
+                    rho_upper = ub["rho"][1]  # upper bound from Phase 0
+                    rho_target = min(rho_baseline, rho_upper)
+                    if ro > rho_target:
+                        # Penalize for being less disassortative than expected
+                        w_rho = _safe(lw["rho"], 1.)
+                        tr = w_rho * ((ro - rho_target) /
+                                      max(abs(rho_target), 1e-6)) ** 2
+                    else:
+                        # Graph beats the baseline — no rho penalty
+                        tr = 0.
             except: pass
             try:
-                ig_u = ig_g.as_undirected(mode="collapse", combine_edges=dict(weight="sum"))
+                ig_u = ig_g.as_undirected(
+                    mode="collapse", combine_edges=dict(weight="sum"))
                 cc = ig_u.transitivity_undirected()
-                if np.isfinite(cc): co=cc; tc=_p("C",co)
-                pt = ig_u.community_multilevel(); qm=pt.modularity
-                if np.isfinite(qm): qo=qm; tq=_p("Q",qo)
+                if np.isfinite(cc): co = cc; tc = _p("C", co)
+                pt = ig_u.community_multilevel(); qm = pt.modularity
+                if np.isfinite(qm): qo = qm; tq = _p("Q", qo)
             except: pass
         except: pass
-    raw = _safe(ta)+_safe(tc)+_safe(tq)+_safe(tg)+_safe(tr)+_safe(ts)
-    return np.sqrt(max(raw,0.)), {'alpha':_safe(ao,1.),'C':_safe(co),'Q':_safe(qo),'Gini':_safe(go,1.),'rho':_safe(ro,1.),'S_max':_safe(smo)}
+
+    raw = _safe(ta) + _safe(tc) + _safe(tq) + _safe(tg) + _safe(tr) + _safe(ts)
+    return np.sqrt(max(raw, 0.)), {
+        'alpha': _safe(ao, 1.), 'C': _safe(co), 'Q': _safe(qo),
+        'Gini': _safe(go, 1.), 'rho': _safe(ro, 1.), 'S_max': _safe(smo)}
 
 # ---- Entry point ----
 def run_dash_and_score(params, W, D, sources, targets, _unused, n_genes,
