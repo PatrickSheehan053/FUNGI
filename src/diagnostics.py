@@ -357,67 +357,155 @@ def _diagnose_modularity_and_clustering(adata, perturbation_column,
 
 
 def _diagnose_rho(impact_array, perturbation_labels, adata,
-                  perturbation_column, control_label, n_genes):
-    """Degree assortativity from hub-to-hub crosstalk."""
+                  perturbation_column, control_label, n_genes,
+                  n_bootstrap=200):
+    """
+    Data-driven degree assortativity from hub-target impact log-ratio.
+
+    Estimates the expected global network assortativity (rho) from the
+    perturbation data using three steps:
+
+    1. For each active perturbation i, find its significant DE targets
+       that are also active perturbations (measurable causal chain).
+       Compute rho_proxy = -tanh(mean(log(k_i / mean_k_j)) / 2).
+
+    2. Attenuate rho_proxy by active_fraction to translate the regulatory
+       core estimate to a full network target. Terminal effectors with
+       out-degree=0 flood the edge list and dilute the global Pearson
+       correlation toward zero (variance pooling effect, Aguirre 2025).
+
+    3. Discount confidence by sqrt(coverage_ratio) to account for the
+       small sample of measurable source-target pairs relative to the
+       full active perturbation set.
+    """
     if len(impact_array) < 20:
         fb = FALLBACK_BOUNDS["rho"]
         return fb[0], fb[1], FALLBACK_CONFIDENCE, (fb[0] + fb[1]) / 2
 
     try:
-        hub_threshold = np.percentile(impact_array, 90)
-        hub_mask = impact_array >= hub_threshold
-        hub_labels = set(perturbation_labels[hub_mask])
+        # Build lookup: gene name -> impact score
+        impact_lookup = {
+            str(label): float(impact)
+            for label, impact in zip(perturbation_labels, impact_array)
+        }
 
-        hub_targets_are_hubs = 0
-        hub_targets_total = 0
+        source_impacts = []
+        mean_target_impacts = []
 
-        for hub in hub_labels:
+        for label, k_i in zip(perturbation_labels, impact_array):
             try:
-                result_df = sc.get.rank_genes_groups_df(adata, group=hub)
+                result_df = sc.get.rank_genes_groups_df(
+                    adata, group=str(label))
                 sig_targets = result_df[
                     (result_df["pvals_adj"] < 0.05) &
                     (result_df["logfoldchanges"].abs() > 0.25)
                 ]["names"].values
 
-                for target in sig_targets:
-                    hub_targets_total += 1
-                    if target in hub_labels:
-                        hub_targets_are_hubs += 1
+                target_impacts = [
+                    impact_lookup[t]
+                    for t in sig_targets
+                    if t in impact_lookup
+                ]
+
+                if len(target_impacts) >= 3:
+                    source_impacts.append(float(k_i))
+                    mean_target_impacts.append(float(np.mean(target_impacts)))
+
             except Exception:
                 continue
 
-        if hub_targets_total == 0:
+        # Diagnostics
+        print(f"    rho diagnostic: {len(source_impacts)} perturbations "
+              f"with >=3 measurable targets in impact set")
+        if source_impacts:
+            sorted_pairs = sorted(
+                zip(source_impacts, mean_target_impacts), reverse=True)
+            print(f"    source range: [{min(source_impacts):.1f}, "
+                  f"{max(source_impacts):.1f}]  "
+                  f"mean_target range: [{min(mean_target_impacts):.1f}, "
+                  f"{max(mean_target_impacts):.1f}]")
+            print(f"    Top 5 pairs (source, mean_target): "
+                  f"{[(round(s,1),round(t,1)) for s,t in sorted_pairs[:5]]}")
+            print(f"    Bottom 5 pairs (source, mean_target): "
+                  f"{[(round(s,1),round(t,1)) for s,t in sorted_pairs[-5:]]}")
+
+        if len(source_impacts) < 10:
             fb = FALLBACK_BOUNDS["rho"]
             return fb[0], fb[1], FALLBACK_CONFIDENCE, (fb[0] + fb[1]) / 2
 
-        n_hubs = len(hub_labels)
-        M = n_genes
-        n = n_hubs
-        N_drawn = hub_targets_total
-        k_obs = hub_targets_are_hubs
+        source_impacts = np.array(source_impacts)
+        mean_target_impacts = np.array(mean_target_impacts)
 
-        pvalue = stats.hypergeom.sf(max(k_obs - 1, 0), M, n, N_drawn)
-        pvalue = _safe_float(pvalue, 0.5)
-        if pvalue < 1e-100:
-            pvalue = 1e-100
+        # Step 1: Log-ratio point estimate of rho_proxy
+        # Positive log ratio = source >> targets = hub-and-spoke = negative rho
+        # Negative log ratio = source << targets = rich-club = positive rho
+        log_ratios = np.log(
+            source_impacts / np.maximum(mean_target_impacts, 1.0))
+        rho_proxy = float(-np.tanh(np.mean(log_ratios) / 2.0))
+        if not np.isfinite(rho_proxy):
+            rho_proxy = -0.10
+        print(f"    log_ratio mean: {np.mean(log_ratios):.4f}  "
+              f"rho_proxy: {rho_proxy:.4f}")
 
-        enrichment_ratio = (k_obs / max(N_drawn, 1)) / max(n / M, 1e-10)
+        # Step 2: Bootstrap over perturbation pairs for variance estimate
+        rng = np.random.default_rng(42)
+        n = len(source_impacts)
+        boot_rhos = []
+        for _ in range(n_bootstrap):
+            idx = rng.choice(n, size=n, replace=True)
+            bs = source_impacts[idx]
+            bt = mean_target_impacts[idx]
+            lr = np.log(bs / np.maximum(bt, 1.0))
+            r = float(-np.tanh(np.mean(lr) / 2.0))
+            if np.isfinite(r):
+                boot_rhos.append(r)
 
-        if enrichment_ratio > 1.5 and pvalue < 0.01:
-            center = -0.05
-            bound_min = -0.15
-            bound_max = 0.05
-        else:
-            center = -0.20
-            bound_min = -0.35
-            bound_max = -0.05
+        if len(boot_rhos) < 10:
+            fb = FALLBACK_BOUNDS["rho"]
+            return fb[0], fb[1], FALLBACK_CONFIDENCE, (fb[0] + fb[1]) / 2
 
-        confidence = _safe_float(
-            np.clip(-np.log10(max(pvalue, 1e-100)) / 20.0, 0.1, 1.0),
-            FALLBACK_CONFIDENCE
-        )
+        boot_sigma = float(np.std(boot_rhos))
+        print(f"    boot_sigma: {boot_sigma:.4f}  "
+              f"boot_mean: {float(np.mean(boot_rhos)):.4f}")
 
-        return bound_min, bound_max, confidence, center
+        # Step 3: Silent fraction for attenuation and bound spreading
+        n_total_perts = len([
+            c for c in adata.obs[perturbation_column].unique()
+            if c != control_label
+        ])
+        silent_fraction = float(np.clip(
+            1.0 - (n / max(n_total_perts, 1)), 0.0, 0.95))
+        active_fraction = 1.0 - silent_fraction
+        print(f"    silent_fraction: {silent_fraction:.4f}  "
+              f"active_fraction: {active_fraction:.4f}")
+
+        # Step 4: Attenuate rho_proxy by active_fraction
+        # Translates regulatory core estimate to full network target.
+        # Terminal effectors dilute global Pearson correlation toward zero
+        # via variance pooling across all edges (Aguirre et al. 2025).
+        rho_attenuated = rho_proxy * active_fraction
+        print(f"    rho_attenuated: {rho_attenuated:.4f}")
+
+        # Step 5: Compute bounds around attenuated estimate
+        scale = max(boot_sigma * 2.0, 0.05)
+        rho_upper = rho_attenuated + boot_sigma
+        rho_lower = rho_attenuated - (silent_fraction * scale)
+
+        # Step 6: Coverage-discounted confidence
+        # Bootstrap sigma measures precision within the core sample only.
+        # sqrt(coverage_ratio) discounts for how well 53 pairs represents
+        # the full active perturbation set.
+        coverage_ratio = n / max(len(impact_array), 1)
+        sample_discount = float(np.clip(np.sqrt(coverage_ratio), 0.25, 1.0))
+        confidence = float(np.clip(
+            1.0 - (boot_sigma / max(abs(rho_proxy), 0.05)),
+            0.10, 1.0)) * sample_discount
+        print(f"    coverage_ratio: {coverage_ratio:.4f}  "
+              f"sample_discount: {sample_discount:.4f}  "
+              f"final_confidence: {confidence:.4f}")
+
+        center = (rho_upper + rho_lower) / 2.0
+        return float(rho_lower), float(rho_upper), confidence, center
 
     except Exception:
         fb = FALLBACK_BOUNDS["rho"]
