@@ -82,43 +82,39 @@ class TrustRegionState:
         self.history_y = [best_loss]
 
     def update(self, new_X, new_y, success_threshold=3,
-               failure_threshold=5, min_length=0.001):
-        """Updates the trust region state after a batch evaluation.
-
-        Parameters
-        ----------
-        new_X : np.ndarray, shape (batch, 6)
-            Evaluated coordinates.
-        new_y : np.ndarray, shape (batch,)
-            Corresponding loss values.
-        """
+            failure_threshold=5, min_length=0.001):
+        """Updates trust region state — evaluates success/failure per BATCH."""
+        # Record all evaluations
         for x, y in zip(new_X, new_y):
             self.history_X.append(x.copy())
             self.history_y.append(y)
 
-            if y < self.best_loss:
-                self.best_loss = y
-                self.center = x.copy()
-                self.successes += 1
-                self.failures = 0
-            else:
-                self.failures += 1
-                self.successes = 0
+        # Batch-level success/failure: did ANY candidate in this batch improve?
+        batch_best_y = min(new_y)
+        batch_best_x = new_X[np.argmin(new_y)]
 
-            # Expand on consecutive successes
-            if self.successes >= success_threshold:
-                self.length = min(self.length * 2.0, 1.0)
-                self.successes = 0
+        if batch_best_y < self.best_loss:
+            self.best_loss = batch_best_y
+            self.center = batch_best_x.copy()
+            self.successes += 1
+            self.failures = 0
+        else:
+            self.failures += 1
+            self.successes = 0
 
-            # Contract on consecutive failures
-            if self.failures >= failure_threshold:
-                self.length /= 2.0
-                self.failures = 0
+        # Expand on consecutive batch successes
+        if self.successes >= success_threshold:
+            self.length = min(self.length * 2.0, 1.0)
+            self.successes = 0
 
-            # Check convergence
-            if self.length < min_length:
-                self.converged = True
-                return
+        # Contract on consecutive batch failures
+        if self.failures >= failure_threshold:
+            self.length /= 2.0
+            self.failures = 0
+
+        # Check convergence
+        if self.length < min_length:
+            self.converged = True
 
 
 # =========================================================================
