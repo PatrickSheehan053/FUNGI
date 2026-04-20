@@ -3,9 +3,9 @@
 # =============================================================================
 
 input:
-  graph_path: "/scratch/patrick.sheehan/MYCELIUM/SPORE_heavy/to_guanlab/VCC_metacell_master_graph.parquet"
-  sc_data_path: "/scratch/patrick.sheehan/MYCELIUM/SPORE_heavy/processed/VCC_train_metacell.h5ad"
-  perturbation_column: "target_gene"
+  graph_path: "/scratch/patrick.sheehan/MYCELIUM/SPORE_heavy/to_guanlab/REP_mc_dense_parent_graph.parquet"
+  sc_data_path: "/scratch/patrick.sheehan/MYCELIUM/SPORE_heavy/processed/replogle_2022_k562_train_metacell.h5ad"
+  perturbation_column: "gene"
   control_label: "non-targeting"
   is_metacell: true
   metacell_pooling_factor: 10
@@ -23,36 +23,39 @@ output:
   figures_dir: "data/output/figures"
 
 diagnostics:
-  n_bootstrap: 1000
+  n_bootstrap: 200
   de_method: "wilcoxon"
   de_pval_threshold: 0.05
   de_lfc_threshold: 0.25
   knn_k_range: [5, 10, 15, 20]
   weight_floor: 1.0
   weight_ceiling: 50.0
+  max_cells_for_de: 20000    # fixed typo from max_cels_for_de
+  max_perts_for_de: 500      # cap perturbation groups for Wilcoxon
+  n_jobs: 15                 # parallelization for rho bootstrap
   bound_constraints:
-    alpha: { delta_min: 0.20, delta_max: 0.80, hard_floor: 1.8, hard_ceiling: 4.0 }
+    alpha: { delta_min: 0.20, delta_max: 0.80, hard_floor: 1.1, hard_ceiling: 4.0 }
     gini:  { delta_min: 0.10, delta_max: 0.40, hard_floor: 0.0, hard_ceiling: 1.0 }
     S_max: { delta_min: 0.02, delta_max: 0.10, hard_floor: 0.01, hard_ceiling: 0.30 }
     Q:     { delta_min: 0.10, delta_max: 0.40, hard_floor: -0.5, hard_ceiling: 1.0 }
-    C:     { delta_min: 0.05, delta_max: 0.30, hard_floor: 0.0, hard_ceiling: 1.0 }
+    C:     { delta_min: 0.05, delta_max: 0.30, hard_floor: 0.0, hard_ceiling: 0.35 }
     rho:   { delta_min: 0.10, delta_max: 0.40, hard_floor: -1.0, hard_ceiling: 1.0 }
   metacell_silhouette_midpoint: 0.60
   singlecell_silhouette_midpoint: 0.25
 
 prefilter:
-  target_density: 0.20
+  target_density: 0.10
 
 hyperparameter_bounds:
   beta:   [1.0, 5.0]
   gamma:  [0.0, 2.5]
   delta:  [0.0, 1.0]
   kappa:  [0.02, 0.08]
-  k_core: [1.0, 15.0]
-  lambda_density: [0.001, 0.020]
+  k_core: [5.0, 15.0]
+  lambda_density: null
 
 expansive_search:
-  n_samples: 25000
+  n_samples: 10000
   n_workers: 15
   chunk_size: 50
   random_seed: 42
@@ -62,23 +65,29 @@ expansive_search:
 # The 99.7% shatter rate from scale_free_degeneration proved that a hard
 # alpha floor kills viable graphs that the optimizer could improve.
 shatter:
-  max_edge_count: 500000
-  max_orphan_fraction: 0.70
-  max_hub_saturation: 0.15
-  min_gwcc_fraction: 0.30
-  min_clustering: 0.002
+  # Static biological constants (never need to change)
+  max_orphan_fraction: 0.15
+  min_gwcc_fraction: 0.35
+  
+  # Dynamic: computed from Phase 0 + N_GENES at runtime
+  # These are tags, not values — resolved by build_shatter_config()
+  lambda_min: 2.0
+  lambda_max: 30.0
+  s_max_ceiling_multiplier: 2.0
+  s_max_ceiling_hard_cap: 0.30
+  min_clustering_gamma: 1.5
 
 niching:
   top_fraction: 0.05
-  n_clusters: 50
+  n_clusters: 10
 
 turbo:
   max_evaluations: 10000
-  batch_size: 20
-  initial_length: 0.05
-  min_length: 0.001
-  success_threshold: 3
-  failure_threshold: 5
+  batch_size: 10          # smaller batches → more rounds → more feedback
+  initial_length: 0.20    # start with larger trust regions
+  min_length: 0.005       # don't collapse to near-zero
+  success_threshold: 3    # keep
+  failure_threshold: 10   # was 5 — give regions room to explore
 
 audit:
   cohort_size: 1
