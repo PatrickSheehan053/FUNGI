@@ -81,8 +81,6 @@ def check_shatter(ss, st, sw, od, n, active, cfg):
     ne = len(ss)
     if ne > cfg.get("max_edge_count", 500000): return True, "density_collapse"
     if (n-active)/max(n,1) > cfg.get("max_orphan_fraction", 0.70): return True, "orphan_collapse"
-    sm = (np.max(od)/n) if len(od)>0 else 0
-    if sm > cfg.get("max_hub_saturation", 0.15): return True, "dictator_hub"
     if ne>0 and active>0:
         try:
             G = sp.coo_matrix((np.ones(ne),(ss,st)), shape=(n,n))
@@ -115,45 +113,28 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa, ub, lw):
     ne = len(ss)
 
     def _p_smooth(par, obs, ub, lw, buffer_frac=0.10, sharpness=5.0):
-        """
-        Smooth continuous penalty replacing the hard step function.
-        
-        Inside bounds: zero penalty.
-        Just outside bounds: gentle sigmoid ramp-up over buffer zone.
-        Far outside bounds: saturates at maximum penalty.
-        
-        buffer_frac: size of transition zone as fraction of bound width.
-                    e.g. 0.10 = 10% of bound width beyond each edge.
-        sharpness:   controls steepness of sigmoid transition.
-                    Higher = more cliff-like, lower = more gradual.
-        """
+        # Smooth continuous penalty: zero inside bounds, sigmoid ramp just
+        # outside, saturates far outside. buffer_frac sets the transition
+        # zone width as fraction of bound width; sharpness controls steepness.
         b = ub[par]
         w = _safe(lw[par], 1.)
         o = _safe(obs, 0.)
         bound_width = max(abs(b[1] - b[0]), 1e-6)
         buffer = bound_width * buffer_frac
-        
+
         if b[0] <= o <= b[1]:
-            return 0.  # inside utopian bounds: no penalty
-        
+            return 0.
+
         if o < b[0]:
-            # Below lower bound
             raw_dist = (b[0] - o) / max(abs(b[0]), 1e-6)
             dist_beyond_buffer = max(0., (b[0] - o) - buffer)
         else:
-            # Above upper bound
             raw_dist = (o - b[1]) / max(abs(b[1]), 1e-6)
             dist_beyond_buffer = max(0., (o - b[1]) - buffer)
-        
-        # Quadratic base penalty scaled by sigmoid smooth onset
+
         base_penalty = raw_dist ** 2
-        
-        # Sigmoid onset: smoothly transitions from 0 to 1 as distance grows
         onset = 1.0 / (1.0 + np.exp(-sharpness * (dist_beyond_buffer / bound_width)))
-        
-        # Saturation: cap at 2× bound width equivalent to prevent domination
-        saturation = min(base_penalty, 4.0)  # 4.0 = (2× bound width)² normalized
-        
+        saturation = min(base_penalty, 4.0)
         return w * saturation * onset
 
     # ── Alpha ──────────────────────────────────────────────────────────────
@@ -177,11 +158,23 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa, ub, lw):
     tg = _p_smooth("gini", go, ub, lw)
 
     # ── S_max ──────────────────────────────────────────────────────────────
-    smo = _safe((np.max(od) / n) if len(od) > 0 else 0)
-    rv = max(0., (smo - kappa) / max(kappa, 1e-6))
-    ts = _safe(lw["S_max"], 1.) * rv ** 2
+    # Primary penalty: smooth bound penalty against utopian range (same
+    # treatment as the other five metrics). Secondary: soft quadratic
+    # consistency term vs kappa, weighted to 25% of the S_max weight so
+    # the bound penalty dominates.
+    smo = _safe((np.max(od) / n) if len(od) > 0 else 0.)
 
-# ── C, Q, Rho ──────────────────────────────────────────────────────────────
+    kappa_weight_fraction = 0.25
+    full_weight  = _safe(lw.get("S_max", 1.0), 1.0)
+    bound_weight = full_weight * (1.0 - kappa_weight_fraction)
+    kappa_weight = full_weight * kappa_weight_fraction
+
+    bound_penalty = _p_smooth("S_max", smo, ub, {"S_max": bound_weight})
+    kappa_excess = max(0., (smo - kappa) / max(kappa, 1e-6))
+    kappa_penalty = kappa_weight * kappa_excess ** 2
+    ts = bound_penalty + kappa_penalty
+
+    # ── C, Q, Rho ──────────────────────────────────────────────────────────
     co, qo, ro = 0., 0., 1.
     tc = _safe(lw["C"], 1.)
     tq = _safe(lw["Q"], 1.)
