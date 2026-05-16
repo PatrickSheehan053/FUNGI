@@ -442,3 +442,103 @@ def _sobol_refinement_fallback(df_phase3, lower, upper, evaluator,
         show_progress=verbose,
     )
     return df_results, False
+
+
+# ---------------------------------------------------------------------------
+# Diverse cohort selection
+# ---------------------------------------------------------------------------
+
+def select_diverse_cohort(df_all, utopian_bounds, n_genes, cohort_size=5,
+                          max_loss_multiplier=3.0):
+    """
+    Select a cohort of topologically diverse candidate graphs.
+
+    Graph #1 is the champion (lowest loss). Graphs #2–N are selected via
+    farthest-point sampling in normalized topology space: each subsequent
+    pick maximizes its minimum distance to all already-selected graphs.
+
+    This ensures the cohort covers meaningfully different topologies,
+    not just near-duplicate configurations with trivially different β.
+
+    Eligibility: loss must be within max_loss_multiplier × champion_loss
+    (or top 15% if champion has zero loss).
+
+    Parameters
+    ----------
+    df_all : pd.DataFrame — all evaluated graphs
+    utopian_bounds : dict {param: [lo, hi]}
+    n_genes : int
+    cohort_size : int — total cohort size including champion
+    max_loss_multiplier : float — loss ceiling for alternates
+
+    Returns
+    -------
+    pd.DataFrame with cohort_size rows, columns for all topology +
+    hyperparameters, plus 'cohort_rank' and 'is_champion'.
+    """
+    df_viable = df_all[df_all["is_shattered"] == 0].copy()
+    if len(df_viable) == 0:
+        raise ValueError("No viable graphs found.")
+
+    # Topology columns: map utopian_bounds keys to DataFrame column names
+    topo_map = [
+        ("alpha", "alpha"),
+        ("gini",  "Gini"),
+        ("S_max", "S_max"),
+        ("Q",     "Q"),
+        ("C",     "C"),
+        ("rho",   "rho"),
+    ]
+
+    # Build normalized topology matrix
+    topo_mat = np.zeros((len(df_viable), 6), dtype=np.float64)
+    for col_idx, (bound_key, df_col) in enumerate(topo_map):
+        lo, hi = utopian_bounds[bound_key]
+        col_range = max(hi - lo, 1e-6)
+        vals = df_viable[df_col].values.astype(np.float64)
+        topo_mat[:, col_idx] = (vals - lo) / col_range
+
+    # Champion: best utopia loss
+    df_viable = df_viable.reset_index(drop=True)
+    champion_pos = int(df_viable["utopia_loss"].idxmin())
+    champion_loss = float(df_viable.loc[champion_pos, "utopia_loss"])
+
+    # Eligibility threshold for alternates
+    if champion_loss > 1e-6:
+        max_loss = champion_loss * max_loss_multiplier
+    else:
+        max_loss = float(df_viable["utopia_loss"].quantile(0.15))
+    eligible_mask = df_viable["utopia_loss"].values <= max_loss
+    eligible_indices = np.where(eligible_mask)[0].tolist()
+
+    if champion_pos not in eligible_indices:
+        eligible_indices.append(champion_pos)
+
+    # Farthest-point sampling
+    selected_positions = [champion_pos]
+    selected_topo = [topo_mat[champion_pos].copy()]
+
+    for _ in range(min(cohort_size - 1, len(eligible_indices) - 1)):
+        best_min_dist = -1.0
+        best_pos = None
+        for pos in eligible_indices:
+            if pos in selected_positions:
+                continue
+            candidate = topo_mat[pos]
+            min_dist = min(
+                float(np.linalg.norm(candidate - s))
+                for s in selected_topo
+            )
+            if min_dist > best_min_dist:
+                best_min_dist = min_dist
+                best_pos = pos
+        if best_pos is None:
+            break
+        selected_positions.append(best_pos)
+        selected_topo.append(topo_mat[best_pos].copy())
+
+    cohort = df_viable.iloc[selected_positions].copy()
+    cohort = cohort.reset_index(drop=True)
+    cohort["cohort_rank"] = list(range(1, len(selected_positions) + 1))
+    cohort["is_champion"] = [True] + [False] * (len(selected_positions) - 1)
+    return cohort
