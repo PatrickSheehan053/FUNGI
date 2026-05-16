@@ -623,3 +623,115 @@ def _motif_repair_swap(surv_s, surv_t, surv_W, omega_full, src_full, tgt_full,
 
     except Exception:
         return surv_s, surv_t, surv_W
+
+
+# ---------------------------------------------------------------------------
+# Graph reconstruction (for final output)
+# ---------------------------------------------------------------------------
+
+def build_graph_from_params(params, W, W_q, D, sources, targets, n_genes,
+                            perturbed_nodes, shatter_cfg, per_gene_kappa,
+                            source_pert_impact):
+    """
+    Reconstruct the actual edge list from champion hyperparameters.
+
+    Uses identical logic to run_dash_and_score (same seeding, scoring,
+    selection, and motif repair) but returns the edge arrays instead of
+    summary statistics. Used to produce the final graph file for SPECTRA.
+
+    Returns
+    -------
+    surv_sources : np.ndarray (int)
+    surv_targets : np.ndarray (int)
+    surv_weights : np.ndarray (float) — original LightGBM importance weights
+    """
+    beta, delta, kappa_base, k_core, lam, psi = params
+    param_hash = abs(hash(tuple(float(p) for p in params))) % (2 ** 31)
+    rng = np.random.default_rng(param_hash)
+
+    k_core = max(k_core, max(5.0, lam * 0.4))
+    T_local = compute_dynamic_topology(W, sources, targets, k_core, n_genes)
+
+    Nm = shatter_cfg.get("max_edge_count", 500000)
+    Ne = min(len(W), Nm + 10000)
+    Ws, Wqs = W[:Ne], W_q[:Ne]
+    ss, ts, Ts = sources[:Ne], targets[:Ne], T_local[:Ne]
+
+    pi_s = np.power(source_pert_impact[ss], psi)
+    num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s
+
+    order = np.lexsort((-num, ss))
+    so, to, Wo, no = ss[order], ts[order], Ws[order], num[order]
+
+    surv_s, surv_t, surv_W = select_edges(
+        no, Wo, so, to, perturbed_nodes, n_genes, lam,
+        per_gene_kappa, kappa_base)
+
+    surv_s, surv_t, surv_W = _motif_repair_swap(
+        surv_s, surv_t, surv_W, no, so, to, n_genes,
+        max_swap_fraction=0.03, rng=rng)
+
+    return surv_s, surv_t, surv_W
+
+
+def recompute_loss_from_metrics(metrics, utopian_bounds, loss_weights,
+                                kappa_base):
+    """
+    Recompute utopia loss from pre-recorded topology metrics.
+
+    Used by the R6 tournament to efficiently evaluate many bound variants
+    without re-running DASH: run DASH once, record metrics, then recompute
+    loss for each probe's proposed bounds.
+
+    Parameters
+    ----------
+    metrics : dict with keys 'alpha', 'Gini', 'S_max', 'Q', 'C', 'rho', 'gwcc_fraction'
+    utopian_bounds : dict {param: [lo, hi]}
+    loss_weights : dict {param: float}
+    kappa_base : float
+
+    Returns
+    -------
+    float — utopia loss
+    """
+
+    def _p_smooth(par, obs, ub, lw, buffer_frac=0.10, sharpness=5.0):
+        b = ub[par]
+        w = _safe(lw.get(par, 1.0), 1.0)
+        o = _safe(obs, 0.)
+        bound_width = max(abs(b[1] - b[0]), 1e-6)
+        buffer = bound_width * buffer_frac
+        if b[0] <= o <= b[1]:
+            return 0.
+        if o < b[0]:
+            raw_dist = (b[0] - o) / max(abs(b[0]), 1e-6)
+            dist_beyond = max(0., (b[0] - o) - buffer)
+        else:
+            raw_dist = (o - b[1]) / max(abs(b[1]), 1e-6)
+            dist_beyond = max(0., (o - b[1]) - buffer)
+        base_penalty = raw_dist ** 2
+        onset = 1.0 / (1.0 + np.exp(-sharpness * (dist_beyond / bound_width)))
+        return w * min(base_penalty, 4.0) * onset
+
+    ta = _p_smooth("alpha", metrics.get("alpha", 1.0), utopian_bounds, loss_weights)
+    tg = _p_smooth("gini", metrics.get("Gini", 1.0), utopian_bounds, loss_weights)
+
+    smo = metrics.get("S_max", 0.0)
+    kf = 0.25
+    fw = _safe(loss_weights.get("S_max", 1.0), 1.0)
+    ts_bound = _p_smooth("S_max", smo, utopian_bounds, {"S_max": fw * (1 - kf)})
+    kappa_excess = max(0., (smo - kappa_base) / max(kappa_base, 1e-6))
+    ts = ts_bound + fw * kf * kappa_excess ** 2
+
+    tc = _p_smooth("C", metrics.get("C", 0.0), utopian_bounds, loss_weights)
+    tq = _p_smooth("Q", metrics.get("Q", 0.0), utopian_bounds, loss_weights)
+    tr = _p_smooth("rho", metrics.get("rho", 1.0), utopian_bounds, loss_weights)
+
+    raw = _safe(ta) + _safe(tc) + _safe(tq) + _safe(tg) + _safe(tr) + _safe(ts)
+
+    gf = metrics.get("gwcc_fraction", 1.0)
+    gp = 0.
+    if gf < 0.45:
+        gp = 8. * ((0.45 - gf) / 0.45) ** 2
+
+    return float(np.sqrt(max(raw + gp, 0.)))
