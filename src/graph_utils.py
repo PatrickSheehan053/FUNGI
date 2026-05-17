@@ -1,14 +1,21 @@
 """
-FUNGI v7.1 -- Graph loading, structural metrics, and topology utilities.
+FUNGI v10.0 -- Graph loading, structural metrics, and topology utilities.
 
-v7.1 fix: _load_edge_list now renames the detected weight column to 'weight'
-before constructing the NetworkX graph. This ensures nx.to_scipy_sparse_array
-picks up the actual continuous importance values instead of defaulting to 1.
+v10.0: load_graph now returns four values:
+  G, sparse_mat, combined_sparse_mat, experimental_df
 
-Previous bug: nx.from_pandas_edgelist stored edge weights under the parquet's
-column name (e.g. 'Importance'), but nx.to_scipy_sparse_array looks for an
-attribute called 'weight' by default. When it didn't find 'weight', it
-silently assigned 1 to every edge, destroying all LightGBM gain signal.
+  sparse_mat          — Importance-weighted CSR (always present). Used by
+                        adaptive_threshold_filter to select the candidate pool
+                        so edge selection is always anchored to LightGBM signal.
+  combined_sparse_mat — combined_score-weighted CSR (experimental GRN only;
+                        None for standard GRN). Passed to run_diagnostics as
+                        raw_sparse_mat so Phase 0 probes estimate targets from
+                        the same weight landscape DASH will operate in.
+                        Falls back to sparse_mat automatically when None.
+  experimental_df     — DataFrame with extra experimental columns, or None.
+
+v7.1 fix (retained): renames detected weight column to 'weight' so
+nx.to_scipy_sparse_array picks up continuous importance values.
 """
 
 import numpy as np
@@ -115,19 +122,17 @@ def _detect_edge_columns(df):
     return src_col, tgt_col, wt_col
 
 
-def _load_edge_list(df, filepath_name):
-    """Converts an edge-list DataFrame to (nx.DiGraph, scipy CSR matrix).
+EXPERIMENTAL_COLS = [
+    "combined_score", "md_score", "md_confidence", "stability",
+    "consensus_sign", "sign_agreement", "pert_efficiency",
+    "method_votes", "in_lgbm", "in_md",
+]
 
-    v7.1 FIX: If the weight column is not already named 'weight', rename it
-    before passing to nx.from_pandas_edgelist. This ensures the actual edge
-    importance values are stored under the 'weight' attribute that
-    nx.to_scipy_sparse_array expects by default.
-    """
+def _load_edge_list(df, filepath_name):
     src_col, tgt_col, wt_col = _detect_edge_columns(df)
     print(f"  Columns detected: source='{src_col}', target='{tgt_col}'"
           + (f", weight='{wt_col}'" if wt_col else ""))
 
-    # Rename the weight column to 'weight' so NetworkX stores it correctly
     if wt_col is not None and wt_col != "weight":
         df = df.rename(columns={wt_col: "weight"})
         print(f"  Renamed '{wt_col}' -> 'weight' for NetworkX compatibility.")
@@ -140,7 +145,6 @@ def _load_edge_list(df, filepath_name):
     )
     sparse_mat = nx.to_scipy_sparse_array(G)
 
-    # Verify the weights were actually preserved
     if wt_col:
         w_data = sparse_mat.data
         n_unique = len(np.unique(w_data[:min(10000, len(w_data))]))
@@ -149,37 +153,64 @@ def _load_edge_list(df, filepath_name):
         else:
             print(f"  Weight range in sparse matrix: [{w_data.min():.4f}, {w_data.max():.4f}]")
 
-    return G, sparse_mat
+    present_exp = [c for c in EXPERIMENTAL_COLS if c in df.columns]
+    experimental_df = df[[src_col, tgt_col] + present_exp].copy() if present_exp else None
+    if present_exp:
+        print(f"  Experimental GRN columns detected: {present_exp}")
+
+    # Build combined_score-weighted sparse matrix when available.
+    # Uses the same node ordering as sparse_mat so it is a drop-in replacement
+    # for raw_sparse_mat in run_diagnostics — Phase 0 probes then see the same
+    # weight landscape that DASH will operate in.
+    combined_sparse_mat = None
+    if experimental_df is not None and "combined_score" in experimental_df.columns:
+        try:
+            node_list = list(G.nodes())
+            node_to_idx = {n: i for i, n in enumerate(node_list)}
+            n = len(node_list)
+            cs_src = experimental_df[src_col].map(node_to_idx).values
+            cs_tgt = experimental_df[tgt_col].map(node_to_idx).values
+            cs_w   = experimental_df["combined_score"].values.astype(np.float64)
+            valid  = ~(pd.isnull(cs_src) | pd.isnull(cs_tgt))
+            cs_src = cs_src[valid].astype(np.int64)
+            cs_tgt = cs_tgt[valid].astype(np.int64)
+            cs_w   = cs_w[valid]
+            combined_sparse_mat = sp.csr_matrix(
+                (cs_w, (cs_src, cs_tgt)), shape=(n, n))
+            cs_data = combined_sparse_mat.data
+            print(f"  combined_score sparse matrix: "
+                  f"[{cs_data.min():.4f}, {cs_data.max():.4f}] "
+                  f"({combined_sparse_mat.nnz:,} edges)")
+        except Exception as e:
+            print(f"  WARNING: could not build combined_score matrix ({e}); "
+                  f"Phase 0 will use Importance weights")
+            combined_sparse_mat = None
+
+    return G, sparse_mat, combined_sparse_mat, experimental_df
 
 
 def load_graph(filepath):
-    """Load a graph from disk and return (NetworkX DiGraph, scipy CSR matrix).
-
-    Supported formats:
-        .npz      -- NumPy/SciPy adjacency matrix archive
-        .csv      -- Edge list (auto-detects column names)
-        .parquet  -- Edge list (auto-detects column names, SPORE native)
-    """
     filepath = Path(filepath)
     print(f"Loading graph from {filepath.name} ...")
 
     if filepath.suffix == ".npz":
         sparse_mat, genes = _load_npz(filepath)
         G = nx.from_scipy_sparse_array(sparse_mat, create_using=nx.DiGraph)
-
         if genes is not None:
             mapping = {i: gene for i, gene in enumerate(genes)}
             G = nx.relabel_nodes(G, mapping)
             print(f"  Node labels mapped from 'genes' array ({len(genes):,} entries).")
+        combined_sparse_mat = None
+        experimental_df = None
 
     elif filepath.suffix == ".csv":
         df = pd.read_csv(filepath)
-        G, sparse_mat = _load_edge_list(df, filepath.name)
+        G, sparse_mat, combined_sparse_mat, experimental_df = _load_edge_list(df, filepath.name)
 
     elif filepath.suffix == ".parquet":
         print("  Detected Parquet format.")
         df = pd.read_parquet(filepath)
-        G, sparse_mat = _load_edge_list(df, filepath.name)
+        G, sparse_mat, combined_sparse_mat, experimental_df = _load_edge_list(df, filepath.name)
 
     else:
         raise ValueError(
@@ -190,10 +221,9 @@ def load_graph(filepath):
     print(f"  Nodes: {G.number_of_nodes():,}")
     print(f"  Edges: {G.number_of_edges():,}")
     print(f"  Density: {nx.density(G):.4%}")
-    return G, sparse_mat
+    # combined_sparse_mat is None for standard GRN; caller uses sparse_mat as fallback
+    return G, sparse_mat, combined_sparse_mat, experimental_df
 
-
-# -------------------------------------------------------------------------
 # Structural metrics
 # -------------------------------------------------------------------------
 
