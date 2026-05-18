@@ -105,15 +105,8 @@ def compute_pagerank_kappa_multipliers(csr_matrix, n_genes,
 
 
 def compute_source_pert_impact(impact_array, perturbation_labels,
-                               name_to_idx, n_genes):
-    """
-    Build a per-gene normalized perturbation impact score from Phase 0 data.
-
-    Genes in the perturbation panel: normalized by mean active impact.
-    Genes not in the panel: 1.0 (neutral prior).
-
-    Returns float64 array of shape (n_genes,).
-    """
+                               name_to_idx, n_genes,
+                               pert_efficiency_map=None):
     source_impact = np.ones(n_genes, dtype=np.float64)
     if len(impact_array) == 0 or len(perturbation_labels) == 0:
         return source_impact
@@ -123,13 +116,188 @@ def compute_source_pert_impact(impact_array, perturbation_labels,
         return source_impact
     mean_impact = float(np.mean(active))
 
+    deg_signal = np.ones(n_genes, dtype=np.float64)
     for i, label in enumerate(perturbation_labels):
         gene_idx = name_to_idx.get(str(label))
         if gene_idx is not None and gene_idx < n_genes:
-            source_impact[gene_idx] = float(impact_array[i]) / max(mean_impact, 1.0)
+            deg_signal[gene_idx] = float(impact_array[i]) / max(mean_impact, 1.0)
+
+    if pert_efficiency_map:
+        eff_signal = np.ones(n_genes, dtype=np.float64)
+        eff_vals = np.array([v for v in pert_efficiency_map.values()
+                             if np.isfinite(v) and v > 0], dtype=np.float64)
+        if len(eff_vals) > 0:
+            eff_max = float(np.percentile(eff_vals, 95))
+            for gene_name, eff in pert_efficiency_map.items():
+                gene_idx = name_to_idx.get(str(gene_name))
+                if gene_idx is not None and gene_idx < n_genes and eff > 0:
+                    eff_signal[gene_idx] = float(np.clip(eff / max(eff_max, 1e-6), 0.1, 2.0))
+        source_impact = 0.5 * deg_signal + 0.5 * eff_signal
+    else:
+        source_impact = deg_signal
 
     return source_impact
 
+import numpy as np
+ 
+ 
+def build_experimental_modifiers(experimental_df, sources, targets, gene_names,
+                                  n_genes, alpha_md=0.5, alpha_stab=0.3,
+                                  n_bootstraps=20, tau_shrinkage=0.5):
+    """
+    Build a per-edge multiplicative gate from experimental GRN columns.
+ 
+    Returns
+    -------
+    total_gate          : np.ndarray float64 shape (len(sources),)
+    pert_efficiency_map : dict {gene_name: float}
+    """
+    import pandas as pd
+    from scipy.special import digamma
+ 
+    n_edges = len(sources)
+    pert_efficiency_map = {}
+ 
+    if experimental_df is None or len(experimental_df) == 0:
+        return np.ones(n_edges, dtype=np.float64), pert_efficiency_map
+ 
+    src_col     = experimental_df.columns[0]
+    tgt_col     = experimental_df.columns[1]
+    exp_col_set = set(experimental_df.columns[2:])
+    name_to_idx = {name: i for i, name in enumerate(gene_names)}
+ 
+    # ── Index mapping ─────────────────────────────────────────────────────
+    exp_src_idx = (experimental_df[src_col].map(name_to_idx)
+                   .fillna(-1).values.astype(np.int64))
+    exp_tgt_idx = (experimental_df[tgt_col].map(name_to_idx)
+                   .fillna(-1).values.astype(np.int64))
+    valid         = (exp_src_idx >= 0) & (exp_tgt_idx >= 0)
+    exp_src_valid = exp_src_idx[valid]
+    exp_tgt_valid = exp_tgt_idx[valid]
+    valid_row_idx = np.where(valid)[0]
+ 
+    # ── Vectorised edge lookup via searchsorted ───────────────────────────
+    exp_keys    = exp_src_valid * np.int64(n_genes) + exp_tgt_valid
+    sort_order  = np.argsort(exp_keys)
+    keys_sorted = exp_keys[sort_order]
+    query_keys  = (sources.astype(np.int64) * np.int64(n_genes)
+                   + targets.astype(np.int64))
+    ins       = np.searchsorted(keys_sorted, query_keys)
+    ins       = np.clip(ins, 0, len(keys_sorted) - 1)
+    matched   = keys_sorted[ins] == query_keys
+    valid_pos = sort_order[ins]  # meaningful only where matched == True
+ 
+    # ── Gate 1: Beta-Binomial log-odds stability gate ─────────────────────
+    # Converts bootstrap stability S/K to Beta(S+1, K-S+1) posterior log-odds.
+    # Normalised by L_max = ψ(K+1)-ψ(1) — the theoretical maximum for K
+    # bootstraps. This anchors stability=0.5 as neutral (gate=1.0) regardless
+    # of the actual stability distribution in the dataset.
+    #
+    # Do NOT normalise by dataset std — that causes a ceiling-effect pathology
+    # when stability is uniformly high (as in VCC chitin, ~80% > 0.85).
+    stability_gate = np.ones(n_edges, dtype=np.float64)
+ 
+    if 'stability' in exp_col_set:
+        stab_valid = experimental_df['stability'].values.astype(
+            np.float64)[valid_row_idx]
+ 
+        stab_arr          = np.full(n_edges, np.nan)
+        stab_arr[matched] = stab_valid[valid_pos[matched]]
+        has_stab          = ~np.isnan(stab_arr)
+        median_stab       = (float(np.median(stab_arr[has_stab]))
+                             if has_stab.sum() > 100 else 0.9)
+        stab_filled       = np.where(has_stab, stab_arr, median_stab)
+ 
+        K        = float(n_bootstraps)
+        S        = np.clip(stab_filled * K, 0.0, K)
+        log_odds = digamma(S + 1.0) - digamma(K - S + 1.0)
+ 
+        # Absolute normalisation: divide by theoretical maximum log-odds
+        L_max = max(float(digamma(K + 1.0) - digamma(1.0)), 1e-6)
+ 
+        stability_gate = np.clip(
+            1.0 + alpha_stab * log_odds / L_max,
+            1.0 - alpha_stab,
+            1.0 + alpha_stab)
+        stability_gate[~has_stab] = 1.0   # no data → neutral
+ 
+    # ── Gate 2: Coverage-aware shrinkage MD gate ──────────────────────────
+    # λi = κi/(κi+τ), where:
+    #   κi = eff_norm_i × sign_consistency_i × (1 + 10 × panel_coverage)
+    # panel_coverage = n_active_sources / n_genes
+    # sparse panels (VCC 96/5024) → stronger shrinkage than genome-wide screens
+    md_gate = np.ones(n_edges, dtype=np.float64)
+ 
+    if 'md_score' in exp_col_set and 'sign_agreement' in exp_col_set:
+        md_valid   = experimental_df['md_score'].values.astype(
+            np.float64)[valid_row_idx]
+        sign_valid = experimental_df['sign_agreement'].values.astype(
+            np.float64)[valid_row_idx]
+ 
+        has_eff   = 'pert_efficiency' in exp_col_set
+        eff_valid = (experimental_df['pert_efficiency'].values.astype(
+            np.float64)[valid_row_idx] if has_eff
+            else np.zeros(len(exp_src_valid), dtype=np.float64))
+ 
+        active_mask    = md_valid > 0
+        active_sources = np.unique(exp_src_valid[active_mask])
+        n_active       = len(active_sources)
+        panel_coverage = n_active / max(n_genes, 1)
+ 
+        max_eff = 1e-6
+        for src in active_sources:
+            src_active = (exp_src_valid == src) & active_mask
+            if src_active.sum() > 0:
+                max_eff = max(max_eff, float(eff_valid[src_active].max()))
+ 
+        lambda_per_src = {}
+        for src in active_sources:
+            src_active = (exp_src_valid == src) & active_mask
+            if src_active.sum() == 0:
+                lambda_per_src[int(src)] = 0.0
+                continue
+            eff_norm  = float(eff_valid[src_active].max()) / max_eff
+            sign_cons = float(sign_valid[src_active].mean())
+            kappa     = eff_norm * sign_cons * (1.0 + 10.0 * panel_coverage)
+            lambda_per_src[int(src)] = kappa / (kappa + tau_shrinkage)
+ 
+        md_rank_norm = np.zeros(len(exp_src_valid), dtype=np.float64)
+        for src in active_sources:
+            src_pos = (exp_src_valid == src) & active_mask
+            n_src   = int(src_pos.sum())
+            if n_src == 0:
+                continue
+            if n_src == 1:
+                md_rank_norm[src_pos] = 1.0
+                continue
+            ranks = np.argsort(np.argsort(md_valid[src_pos])).astype(np.float64)
+            md_rank_norm[src_pos] = ranks / (n_src - 1)
+ 
+        matched_idx = np.where(matched)[0]
+        if len(matched_idx) > 0:
+            pos        = valid_pos[matched]
+            src_at_pos = exp_src_valid[pos]
+            lam_arr    = np.array([lambda_per_src.get(int(s), 0.0)
+                                   for s in src_at_pos], dtype=np.float64)
+            contrib    = (1.0 + alpha_md * lam_arr
+                          * md_rank_norm[pos] * sign_valid[pos])
+            boost      = (md_rank_norm[pos] > 0) & (lam_arr > 0)
+            md_gate[matched_idx[boost]] = contrib[boost]
+ 
+    # ── Pert efficiency map ───────────────────────────────────────────────
+    if 'pert_efficiency' in exp_col_set:
+        eff_sub = (experimental_df[[src_col, 'pert_efficiency']]
+                   .copy()
+                   .pipe(lambda df: df[df['pert_efficiency'] > 0])
+                   .dropna())
+        if len(eff_sub) > 0:
+            max_eff_df = eff_sub.groupby(src_col)['pert_efficiency'].max()
+            pert_efficiency_map = {
+                str(k): float(v) for k, v in max_eff_df.items()
+                if np.isfinite(v) and v > 0}
+ 
+    total_gate = np.clip(stability_gate * md_gate, 0.5, 2.0)
+    return total_gate, pert_efficiency_map
 
 # ---------------------------------------------------------------------------
 # GraphBLAS FFL topology (degree-normalized T̃_st)
@@ -428,34 +596,14 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa_base, ub, lw):
 
 def run_dash_and_score(params, W, W_q, D, sources, targets, n_genes,
                        perturbed_nodes, utopian_bounds, loss_weights,
-                       shatter_cfg, per_gene_kappa, source_pert_impact):
-    """
-    Evaluate a single 6D hyperparameter configuration.
-
-    params: [beta, delta, kappa_base, k_core, lambda, psi]
-      - beta       : source-quantile weight exponent
-      - delta      : FFL motif bonus strength
-      - kappa_base : base hub cap fraction (per-gene cap = kappa_base × PageRank_multiplier)
-      - k_core     : topology radius for FFL computation
-      - lambda     : target edges/gene
-      - psi        : perturbation impact prior strength
-
-    W_q:              source-quantile normalized weights (same order as W)
-    per_gene_kappa:   per-gene κ multiplier from PageRank (n_genes array)
-    source_pert_impact: per-gene normalized CRISPRi impact (n_genes array)
-    """
+                       shatter_cfg, per_gene_kappa, source_pert_impact,
+                       md_gate=None):
     try:
         beta, delta, kappa_base, k_core, lam, psi = params
-
-        # Deterministic seeding from hyperparameter hash
         param_hash = abs(hash(tuple(float(p) for p in params))) % (2 ** 31)
         rng = np.random.default_rng(param_hash)
-
         k_core = max(k_core, max(5.0, lam * 0.4))
-
-        # Compute degree-normalized FFL topology
         T_local = compute_dynamic_topology(W, sources, targets, k_core, n_genes)
-
         Nm = shatter_cfg.get("max_edge_count", 500000)
         Ne = min(len(W), Nm + 10000)
         Ws = W[:Ne]
@@ -463,15 +611,10 @@ def run_dash_and_score(params, W, W_q, D, sources, targets, n_genes,
         ss = sources[:Ne]
         ts = targets[:Ne]
         Ts = T_local[:Ne]
-
-        # Perturbation impact prior per edge
         pi_s = np.power(source_pert_impact[ss], psi)
-
-        # Scoring formula:
-        # ω = w̃^β × exp(δ × T̃_st) × π_s
-        # where w̃ is source-quantile normalized weight
-        num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s
-
+        gate = md_gate[:Ne] if md_gate is not None else np.ones(Ne, dtype=np.float64)
+        num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s * gate
+       
         # Per-source ranking for selection ordering
         order = np.lexsort((-num, ss))
         so, to, Wo, no = ss[order], ts[order], Ws[order], num[order]
@@ -631,34 +774,19 @@ def _motif_repair_swap(surv_s, surv_t, surv_W, omega_full, src_full, tgt_full,
 
 def build_graph_from_params(params, W, W_q, D, sources, targets, n_genes,
                             perturbed_nodes, shatter_cfg, per_gene_kappa,
-                            source_pert_impact):
-    """
-    Reconstruct the actual edge list from champion hyperparameters.
-
-    Uses identical logic to run_dash_and_score (same seeding, scoring,
-    selection, and motif repair) but returns the edge arrays instead of
-    summary statistics. Used to produce the final graph file for SPECTRA.
-
-    Returns
-    -------
-    surv_sources : np.ndarray (int)
-    surv_targets : np.ndarray (int)
-    surv_weights : np.ndarray (float) — original LightGBM importance weights
-    """
+                            source_pert_impact, md_gate=None):
     beta, delta, kappa_base, k_core, lam, psi = params
     param_hash = abs(hash(tuple(float(p) for p in params))) % (2 ** 31)
     rng = np.random.default_rng(param_hash)
-
     k_core = max(k_core, max(5.0, lam * 0.4))
     T_local = compute_dynamic_topology(W, sources, targets, k_core, n_genes)
-
     Nm = shatter_cfg.get("max_edge_count", 500000)
     Ne = min(len(W), Nm + 10000)
     Ws, Wqs = W[:Ne], W_q[:Ne]
     ss, ts, Ts = sources[:Ne], targets[:Ne], T_local[:Ne]
-
     pi_s = np.power(source_pert_impact[ss], psi)
-    num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s
+    gate = md_gate[:Ne] if md_gate is not None else np.ones(Ne, dtype=np.float64)
+    num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s * gate
 
     order = np.lexsort((-num, ss))
     so, to, Wo, no = ss[order], ts[order], Ws[order], num[order]
