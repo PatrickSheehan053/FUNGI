@@ -1,18 +1,16 @@
 """
 FUNGI v10.0 -- Graph loading, structural metrics, and topology utilities.
 
-v10.0: load_graph now returns four values:
-  G, sparse_mat, combined_sparse_mat, experimental_df
+v10.0: load_graph returns three values:
+  G, sparse_mat, experimental_df
 
-  sparse_mat          — Importance-weighted CSR (always present). Used by
-                        adaptive_threshold_filter to select the candidate pool
-                        so edge selection is always anchored to LightGBM signal.
-  combined_sparse_mat — combined_score-weighted CSR (experimental GRN only;
-                        None for standard GRN). Passed to run_diagnostics as
-                        raw_sparse_mat so Phase 0 probes estimate targets from
-                        the same weight landscape DASH will operate in.
-                        Falls back to sparse_mat automatically when None.
-  experimental_df     — DataFrame with extra experimental columns, or None.
+  sparse_mat      — Importance-weighted CSR. Always used for Phase 0 probes
+                    and DASH W ranking. LightGBM Importance is the structural
+                    backbone; experimental signal modifies within it, never
+                    replaces it.
+  experimental_df — DataFrame with extra experimental columns (combined_score,
+                    md_score, stability, consensus_sign, sign_agreement,
+                    pert_efficiency, method_votes) or None for standard GRNs.
 
 v7.1 fix (retained): renames detected weight column to 'weight' so
 nx.to_scipy_sparse_array picks up continuous importance values.
@@ -158,35 +156,7 @@ def _load_edge_list(df, filepath_name):
     if present_exp:
         print(f"  Experimental GRN columns detected: {present_exp}")
 
-    # Build combined_score-weighted sparse matrix when available.
-    # Uses the same node ordering as sparse_mat so it is a drop-in replacement
-    # for raw_sparse_mat in run_diagnostics — Phase 0 probes then see the same
-    # weight landscape that DASH will operate in.
-    combined_sparse_mat = None
-    if experimental_df is not None and "combined_score" in experimental_df.columns:
-        try:
-            node_list = list(G.nodes())
-            node_to_idx = {n: i for i, n in enumerate(node_list)}
-            n = len(node_list)
-            cs_src = experimental_df[src_col].map(node_to_idx).values
-            cs_tgt = experimental_df[tgt_col].map(node_to_idx).values
-            cs_w   = experimental_df["combined_score"].values.astype(np.float64)
-            valid  = ~(pd.isnull(cs_src) | pd.isnull(cs_tgt))
-            cs_src = cs_src[valid].astype(np.int64)
-            cs_tgt = cs_tgt[valid].astype(np.int64)
-            cs_w   = cs_w[valid]
-            combined_sparse_mat = sp.csr_matrix(
-                (cs_w, (cs_src, cs_tgt)), shape=(n, n))
-            cs_data = combined_sparse_mat.data
-            print(f"  combined_score sparse matrix: "
-                  f"[{cs_data.min():.4f}, {cs_data.max():.4f}] "
-                  f"({combined_sparse_mat.nnz:,} edges)")
-        except Exception as e:
-            print(f"  WARNING: could not build combined_score matrix ({e}); "
-                  f"Phase 0 will use Importance weights")
-            combined_sparse_mat = None
-
-    return G, sparse_mat, combined_sparse_mat, experimental_df
+    return G, sparse_mat, experimental_df
 
 
 def load_graph(filepath):
@@ -200,17 +170,16 @@ def load_graph(filepath):
             mapping = {i: gene for i, gene in enumerate(genes)}
             G = nx.relabel_nodes(G, mapping)
             print(f"  Node labels mapped from 'genes' array ({len(genes):,} entries).")
-        combined_sparse_mat = None
         experimental_df = None
 
     elif filepath.suffix == ".csv":
         df = pd.read_csv(filepath)
-        G, sparse_mat, combined_sparse_mat, experimental_df = _load_edge_list(df, filepath.name)
+        G, sparse_mat, experimental_df = _load_edge_list(df, filepath.name)
 
     elif filepath.suffix == ".parquet":
         print("  Detected Parquet format.")
         df = pd.read_parquet(filepath)
-        G, sparse_mat, combined_sparse_mat, experimental_df = _load_edge_list(df, filepath.name)
+        G, sparse_mat, experimental_df = _load_edge_list(df, filepath.name)
 
     else:
         raise ValueError(
@@ -221,8 +190,7 @@ def load_graph(filepath):
     print(f"  Nodes: {G.number_of_nodes():,}")
     print(f"  Edges: {G.number_of_edges():,}")
     print(f"  Density: {nx.density(G):.4%}")
-    # combined_sparse_mat is None for standard GRN; caller uses sparse_mat as fallback
-    return G, sparse_mat, combined_sparse_mat, experimental_df
+    return G, sparse_mat, experimental_df
 
 # Structural metrics
 # -------------------------------------------------------------------------
