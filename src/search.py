@@ -1,13 +1,11 @@
 """
-FUNGI v9.0 — Search Space Generation and Parallel Execution
+FUNGI v9.1 — Search Space Generation and Parallel Execution
 
-Key changes from v8.0:
-  - γ (rank decay) removed; replaced by ψ (perturbation impact prior) [0.0, 2.0]
-  - β range reduced to [1.0, 3.0] (dead zone above 3 removed)
-  - k_core range extended to [8.0, 22.0] (both runs clustered near old ceiling)
-  - κ base range extended to [0.02, 0.15] (accommodates larger regulons)
-  - SearchEvaluator now carries W_source_quantile, per_gene_kappa, source_pert_impact
-  - These are ray.put()'d once and reused by both Phase 3 and Phase 5
+Changes from v9.0:
+  - SearchEvaluator accepts er_scores (np.ndarray or None) and er_eta (float).
+  - er_scores is ray.put() once alongside all other arrays and passed through
+    to run_dash_and_score in every _eval_chunk call.
+  - er_scores=None is a strict no-op (backward-compatible with saved shards).
 """
 import os
 import glob
@@ -22,7 +20,7 @@ from scipy.stats.qmc import Sobol
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 
-def compute_lambda_search_bounds(lam_eff, n_genes, static_lo=2.0, static_hi=30.0):
+def compute_lambda_search_bounds(lam_eff, n_genes, static_lo=2.0, static_hi=35.0):
     lo = max(static_lo, lam_eff * 0.4)
     hi = min(static_hi, lam_eff * 2.5)
     if hi - lo < 6.0:
@@ -38,9 +36,8 @@ def get_static_bounds(n_genes, hp_cfg, lam_eff=None):
     elif lam_eff is not None:
         ld = list(compute_lambda_search_bounds(lam_eff, n_genes))
     else:
-        ld = [2.0 / n_genes, 30.0 / n_genes]
+        ld = [2.0 / n_genes, 35.0 / n_genes]
 
-    # New 6D: [beta, delta, kappa, k_core, lambda, psi]
     names = ["beta", "delta", "kappa", "k_core", "lambda", "psi"]
     lower = np.array([
         hp_cfg["beta"][0],
@@ -97,27 +94,59 @@ def _try_ray():
 class SearchEvaluator:
     """
     Persistent evaluator: presorts edges and ray.put's all data ONCE.
-    Carries the new arrays needed by the v9 DASH kernel:
-      - W_source_quantile (source-quantile normalized weights)
-      - per_gene_kappa (PageRank-derived κ multipliers)
-      - source_pert_impact (CRISPRi impact prior per source gene)
+
+    v9.1 additions:
+      - er_scores  : per-edge ER scores (same presorted order as W).
+                     If None, ER factor is 1.0 everywhere (no change to
+                     existing behavior).
+      - er_eta     : exponent for R_st^η (default 0.3).
     """
 
     def __init__(self, W_arr, W_q_arr, D_arr, sources_arr, targets_arr,
                  n_genes, perturbed_nodes, utopian_bounds, loss_weights,
                  shatter_cfg, per_gene_kappa, source_pert_impact,
-                 n_workers=15, src_dir=None):
+                 n_workers=15, src_dir=None,
+                 md_gate=None,
+                 er_scores=None, er_eta=0.3, inter_mask=None,
+                 chi_prior=None):
 
         self.n_genes = n_genes
         self.n_workers = n_workers
         self.src_dir = src_dir or os.path.dirname(os.path.abspath(__file__))
+        self.er_eta = float(er_eta)
 
         # Presort once — W_q in same order as W
         (self.Ws, self.Wqs, self.Ds,
          self.srcs, self.tgts) = presort_edges(
             W_arr, W_q_arr, D_arr, sources_arr, targets_arr)
 
-        # Store for non-Ray fallback and Phase 5
+        # If er_scores provided, apply the same presort order so the array
+        # stays aligned with Ws/srcs/tgts after presort_edges.
+        if er_scores is not None:
+            order = np.argsort(W_arr)[::-1]
+            self.er_scores = er_scores[order].astype(np.float64)
+        else:
+            self.er_scores = None
+
+        # inter_mask: presort in the same order as er_scores
+        if inter_mask is not None:
+            order = np.argsort(W_arr)[::-1]
+            self.inter_mask = inter_mask[order].astype(bool)
+        else:
+            self.inter_mask = None
+
+        # chi_prior: per-gene array, NOT edge-level — no presort needed.
+        # chi_prior[s] is looked up by source node index during DASH scoring.
+        self.chi_prior = (chi_prior.astype(np.float64)
+                          if chi_prior is not None else None)
+
+        # md_gate: presort in the same order
+        if md_gate is not None:
+            order = np.argsort(W_arr)[::-1]
+            self.md_gate = md_gate[order].astype(np.float64)
+        else:
+            self.md_gate = None
+
         self._perturbed_nodes = perturbed_nodes
         self._utopian_bounds = utopian_bounds
         self._loss_weights = loss_weights
@@ -164,6 +193,12 @@ class SearchEvaluator:
             "shatter": ray.put(self._shatter_cfg),
             "kappa":  ray.put(self._per_gene_kappa),
             "impact": ray.put(self._source_pert_impact),
+            "md":     ray.put(self.md_gate),
+            # er_scores / inter_mask / chi_prior may be None — ray.put(None) is valid
+            "er":         ray.put(self.er_scores),
+            "er_eta":     ray.put(self.er_eta),
+            "inter_mask": ray.put(self.inter_mask),
+            "chi":        ray.put(self.chi_prior),
         }
         return True
 
@@ -180,13 +215,16 @@ class SearchEvaluator:
         src_dir = self.src_dir
 
         @ray.remote
-        def _eval_chunk(chunk, Wr, Wqr, Dr, sr, tr, ng, pr, br, wr, shr, kr, ir, sd):
+        def _eval_chunk(chunk, Wr, Wqr, Dr, sr, tr, ng,
+                        pr, br, wr, shr, kr, ir, mdr, err, er_eta_r, imr, chir, sd):
             import sys
             if sd not in sys.path:
                 sys.path.insert(0, sd)
             from engine import run_dash_and_score
             return [run_dash_and_score(
-                p, Wr, Wqr, Dr, sr, tr, ng, pr, br, wr, shr, kr, ir)
+                p, Wr, Wqr, Dr, sr, tr, ng, pr, br, wr, shr, kr, ir,
+                md_gate=mdr, er_scores=err, er_eta=er_eta_r,
+                inter_mask=imr, chi_prior=chir)
                 for p in chunk]
 
         # Shard recovery
@@ -221,7 +259,9 @@ class SearchEvaluator:
                 c, refs["W"], refs["W_q"], refs["D"],
                 refs["src"], refs["tgt"], n_genes,
                 refs["pert"], refs["bounds"], refs["weights"],
-                refs["shatter"], refs["kappa"], refs["impact"], src_dir)
+                refs["shatter"], refs["kappa"], refs["impact"],
+                refs["md"], refs["er"], refs["er_eta"],
+                refs["inter_mask"], refs["chi"], src_dir)
             for c in chunks
         ]
 
@@ -257,7 +297,10 @@ class SearchEvaluator:
             params, self.Ws, self.Wqs, self.Ds, self.srcs, self.tgts,
             self.n_genes, self._perturbed_nodes,
             self._utopian_bounds, self._loss_weights, self._shatter_cfg,
-            self._per_gene_kappa, self._source_pert_impact)
+            self._per_gene_kappa, self._source_pert_impact,
+            md_gate=self.md_gate,
+            er_scores=self.er_scores, er_eta=self.er_eta,
+            inter_mask=self.inter_mask, chi_prior=self.chi_prior)
 
     def evaluate_batch_for_optimizer(self, batch_params):
         """Used by refinement.py — returns list of result dicts."""
@@ -272,6 +315,9 @@ class SearchEvaluator:
                 p, self.Ws, self.Wqs, self.Ds, self.srcs, self.tgts,
                 self.n_genes, self._perturbed_nodes,
                 self._utopian_bounds, self._loss_weights, self._shatter_cfg,
-                self._per_gene_kappa, self._source_pert_impact)
+                self._per_gene_kappa, self._source_pert_impact,
+                md_gate=self.md_gate,
+                er_scores=self.er_scores, er_eta=self.er_eta,
+                inter_mask=self.inter_mask, chi_prior=self.chi_prior)
             for p in param_list)
         return pd.DataFrame(results)
