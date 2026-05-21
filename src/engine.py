@@ -1,16 +1,15 @@
 """
-FUNGI v9.0 — DASH Kernel Engine
+FUNGI v9.1 — DASH Kernel Engine
 
-Key changes from v7.1:
-  - γ (rank decay) removed; replaced by ψ (perturbation impact prior)
-  - T_st normalized by sqrt(d_out(s) × d_in(t)) — removes degree bias (Dice normalization)
-  - Motif bonus changed from additive (1 + δ×T) to exponential exp(δ×T̃) — consistent relative bonus
-  - Pre-β weight normalization: source-quantile normalized weights used for scoring
-  - Per-gene soft κ via PageRank multiplier array — data-driven, no external databases
-  - Perturbation impact prior ψ: source genes with more CRISPRi DEGs get preference
-  - DASH evaluations are deterministic: seeded by hash of hyperparameter tuple
-  - Motif repair swap budget reduced from 10% to 3%
-  - New helpers: compute_source_quantile_weights, compute_pagerank_kappa_multipliers
+Changes from v9.0:
+  - Effective Resistance (ER) scoring integrated as a multiplicative term:
+      ω(s→t) = Wq^β × exp(δ×T̃) × π_s^ψ × G_st × R_st^η
+    where R_st is the rank-normalized approximate effective resistance and
+    η is a fixed constant (default 0.3), not a tunable hyperparameter.
+  - run_dash_and_score and build_graph_from_params accept optional
+    er_scores (np.ndarray) and er_eta (float) keyword arguments.
+  - er_scores=None (default) is a strict no-op: factor collapses to 1.0,
+    preserving full backward compatibility with existing saved results.
 """
 
 import numpy as np
@@ -47,24 +46,19 @@ def compute_source_quantile_weights(sources, weights, n_genes):
     if n_edges == 0:
         return np.ones(0, dtype=np.float64)
 
-    # Sort by (source asc, weight desc) to group per source
     order = np.lexsort((-weights, sources))
     src_s = sources[order]
 
-    # Find group boundaries
     src_change = np.concatenate([[True], src_s[1:] != src_s[:-1]])
     group_start = np.where(src_change)[0]
     group_sizes = np.diff(np.concatenate([group_start, [n_edges]]))
 
-    # Position within group (0 = highest weight within source)
     pos_in_group = (np.arange(n_edges) -
                     np.repeat(group_start, group_sizes))
     n_in_group = np.repeat(group_sizes, group_sizes)
 
-    # Quantile: position 0 → 1.0, last position → ~0.0 (highest weight = highest score)
     W_q_sorted = 1.0 - (pos_in_group + 0.5) / np.maximum(n_in_group, 1.0)
 
-    # Map back to original edge order
     W_quantile = np.empty(n_edges, dtype=np.float64)
     W_quantile[order] = W_q_sorted
     return W_quantile
@@ -78,16 +72,13 @@ def compute_pagerank_kappa_multipliers(csr_matrix, n_genes,
     Run power-iteration PageRank on the filtered parent graph.
     Returns a per-gene multiplier array: top hub_percentile% of genes
     get hub_multiplier × the base κ; all others get 1.0×.
-
-    This is entirely data-driven — no external TF annotation needed.
-    Works universally for any cell type or organism.
     """
     n = csr_matrix.shape[0]
     out_deg = np.asarray(csr_matrix.sum(axis=1)).ravel().astype(np.float64)
     out_deg = np.where(out_deg > 0, out_deg, 1.0)
 
     D_inv = sp.diags(1.0 / out_deg)
-    M = (D_inv @ csr_matrix).astype(np.float64)  # row-stochastic
+    M = (D_inv @ csr_matrix).astype(np.float64)
 
     pr = np.ones(n, dtype=np.float64) / n
     teleport = (1.0 - alpha) / n
@@ -106,7 +97,22 @@ def compute_pagerank_kappa_multipliers(csr_matrix, n_genes,
 
 def compute_source_pert_impact(impact_array, perturbation_labels,
                                name_to_idx, n_genes,
-                               pert_efficiency_map=None):
+                               pert_efficiency_map=None,
+                               deg_out_parent=None):
+    """
+    Compute per-gene perturbation impact prior (π_s).
+
+    v9.3 change (Gemini normalization):
+        π_s is now normalized by the source gene's out-degree in the parent
+        graph, converting from raw DEG footprint to regulatory efficiency
+        (DEGs produced per outgoing edge). This prevents hub genes with
+        thousands of outgoing edges from dominating purely through volume.
+
+        π_s = (impact_i / mean_impact) / (deg_out_i / mean_deg_out)
+
+        Genes not in the perturbation set keep π_s = 1.0 as before.
+        If deg_out_parent is not provided, falls back to v9.2 behavior.
+    """
     source_impact = np.ones(n_genes, dtype=np.float64)
     if len(impact_array) == 0 or len(perturbation_labels) == 0:
         return source_impact
@@ -116,11 +122,35 @@ def compute_source_pert_impact(impact_array, perturbation_labels,
         return source_impact
     mean_impact = float(np.mean(active))
 
+    # Gemini normalization: compute efficiency-adjusted deg signal
+    if deg_out_parent is not None and len(deg_out_parent) == n_genes:
+        deg_out = np.asarray(deg_out_parent, dtype=np.float64)
+        # Mean out-degree only over genes that ARE perturbation targets
+        target_idxs = [name_to_idx.get(str(l)) for l in perturbation_labels]
+        target_idxs = [i for i in target_idxs if i is not None and i < n_genes]
+        if len(target_idxs) > 0:
+            mean_deg_out = float(np.mean(deg_out[target_idxs]))
+            mean_deg_out = max(mean_deg_out, 1.0)
+        else:
+            mean_deg_out = 1.0
+    else:
+        deg_out = None
+        mean_deg_out = 1.0
+
     deg_signal = np.ones(n_genes, dtype=np.float64)
     for i, label in enumerate(perturbation_labels):
         gene_idx = name_to_idx.get(str(label))
         if gene_idx is not None and gene_idx < n_genes:
-            deg_signal[gene_idx] = float(impact_array[i]) / max(mean_impact, 1.0)
+            raw_ratio = float(impact_array[i]) / max(mean_impact, 1.0)
+            if deg_out is not None:
+                # Normalize by out-degree: efficiency = DEGs_caused / edges_available
+                gene_deg_out = max(float(deg_out[gene_idx]), 1.0)
+                deg_out_ratio = gene_deg_out / mean_deg_out
+                # Efficiency: penalizes genes whose DEG count is explained purely
+                # by having more edges to fire from
+                deg_signal[gene_idx] = raw_ratio / deg_out_ratio
+            else:
+                deg_signal[gene_idx] = raw_ratio
 
     if pert_efficiency_map:
         eff_signal = np.ones(n_genes, dtype=np.float64)
@@ -136,7 +166,85 @@ def compute_source_pert_impact(impact_array, perturbation_labels,
     else:
         source_impact = deg_signal
 
+    # Clip to prevent extreme values from any combination of signals
+    source_impact = np.clip(source_impact, 0.0, 10.0)
     return source_impact
+
+
+def compute_chi_prior(deg_col_sums, n_genes, zeta=0.5):
+    """
+    Compute the perturbation pleiotropy prior χ for all n_genes genes.
+
+    χ(s) captures how frequently gene s appears as a DEG across ALL
+    training perturbations. This is derived from the column sums of the
+    Phase 0 DEG matrix:
+
+        col_sum[s] = number of training perturbations for which gene s
+                     is a statistically significant DEG
+
+    A gene that is a DEG under many independent CRISPRi knockdowns is a
+    regulatory convergence point — many upstream pathways run through it,
+    and it likely has its own significant downstream regulatory output.
+
+    This signal is:
+    - Global: defined for ALL 5,024 genes, not just the 96 perturbed ones
+    - Data-derived: comes directly from the Phase 0 DE results
+    - Biologically grounded: high col_sum = regulatory hub (cf. PANDA
+      gene targeting score, Sonawane et al. 2017; hub-centred GRN priors,
+      van Someren et al. 2006)
+    - Generalizable: val/test genes that happen to be frequent DEGs in
+      training perturbations will also receive this boost organically
+
+    Formula:
+        g  = mean(col_sum[col_sum > 0])    # mean over genes ever observed
+        chi_raw(s) = max(1.0, 1 + log(col_sum[s] / g))  if col_sum[s] > g
+                   = 1.0                                  otherwise
+        chi(s) = chi_raw(s) ^ zeta          # dampen with fixed exponent
+
+    At zeta=0.5 (default, fixed — not a hyperparameter):
+        col_sum = g   → chi = 1.00  (average, neutral)
+        col_sum = 2g  → chi = 1.30
+        col_sum = 4g  → chi = 1.55
+        col_sum = 8g  → chi = 1.76
+        col_sum = 0   → chi = 1.00  (floor, no penalty)
+
+    The log-damping ensures the boost is bounded even for extreme hubs.
+    The zeta=0.5 power further compresses the range to a conservative
+    [1.0, ~1.8] spread — meaningful but cannot dominate other DASH terms.
+
+    Parameters
+    ----------
+    deg_col_sums : np.ndarray, shape (n_genes,)
+        Column sums of the Phase 0 DEG matrix. From diagnostic_report.
+    n_genes : int
+    zeta : float
+        Exponent applied to chi_raw. Fixed at 0.5 (not a hyperparameter).
+        Increasing to 1.0 doubles the boost strength if needed.
+
+    Returns
+    -------
+    chi : np.ndarray, shape (n_genes,), dtype float64
+        Per-gene chi values in [1.0, ~1.8] for zeta=0.5.
+    """
+    chi = np.ones(n_genes, dtype=np.float64)
+    if deg_col_sums is None or len(deg_col_sums) != n_genes:
+        return chi
+
+    col = np.asarray(deg_col_sums, dtype=np.float64)
+    nonzero = col[col > 0]
+    if len(nonzero) == 0:
+        return chi
+
+    g = float(np.mean(nonzero))  # mean over genes ever observed as a DEG
+
+    # Log-damped boost for genes above the mean
+    above = col > g
+    chi[above] = np.maximum(1.0, 1.0 + np.log(col[above] / g))
+
+    # Apply zeta exponent (fixed at 0.5 — conservative, not a hyperparameter)
+    chi = np.power(chi, float(zeta))
+
+    return chi
 
 import numpy as np
  
@@ -166,7 +274,6 @@ def build_experimental_modifiers(experimental_df, sources, targets, gene_names,
     exp_col_set = set(experimental_df.columns[2:])
     name_to_idx = {name: i for i, name in enumerate(gene_names)}
  
-    # ── Index mapping ─────────────────────────────────────────────────────
     exp_src_idx = (experimental_df[src_col].map(name_to_idx)
                    .fillna(-1).values.astype(np.int64))
     exp_tgt_idx = (experimental_df[tgt_col].map(name_to_idx)
@@ -176,7 +283,6 @@ def build_experimental_modifiers(experimental_df, sources, targets, gene_names,
     exp_tgt_valid = exp_tgt_idx[valid]
     valid_row_idx = np.where(valid)[0]
  
-    # ── Vectorised edge lookup via searchsorted ───────────────────────────
     exp_keys    = exp_src_valid * np.int64(n_genes) + exp_tgt_valid
     sort_order  = np.argsort(exp_keys)
     keys_sorted = exp_keys[sort_order]
@@ -185,16 +291,8 @@ def build_experimental_modifiers(experimental_df, sources, targets, gene_names,
     ins       = np.searchsorted(keys_sorted, query_keys)
     ins       = np.clip(ins, 0, len(keys_sorted) - 1)
     matched   = keys_sorted[ins] == query_keys
-    valid_pos = sort_order[ins]  # meaningful only where matched == True
+    valid_pos = sort_order[ins]
  
-    # ── Gate 1: Beta-Binomial log-odds stability gate ─────────────────────
-    # Converts bootstrap stability S/K to Beta(S+1, K-S+1) posterior log-odds.
-    # Normalised by L_max = ψ(K+1)-ψ(1) — the theoretical maximum for K
-    # bootstraps. This anchors stability=0.5 as neutral (gate=1.0) regardless
-    # of the actual stability distribution in the dataset.
-    #
-    # Do NOT normalise by dataset std — that causes a ceiling-effect pathology
-    # when stability is uniformly high (as in VCC chitin, ~80% > 0.85).
     stability_gate = np.ones(n_edges, dtype=np.float64)
  
     if 'stability' in exp_col_set:
@@ -212,20 +310,14 @@ def build_experimental_modifiers(experimental_df, sources, targets, gene_names,
         S        = np.clip(stab_filled * K, 0.0, K)
         log_odds = digamma(S + 1.0) - digamma(K - S + 1.0)
  
-        # Absolute normalisation: divide by theoretical maximum log-odds
         L_max = max(float(digamma(K + 1.0) - digamma(1.0)), 1e-6)
  
         stability_gate = np.clip(
             1.0 + alpha_stab * log_odds / L_max,
             1.0 - alpha_stab,
             1.0 + alpha_stab)
-        stability_gate[~has_stab] = 1.0   # no data → neutral
+        stability_gate[~has_stab] = 1.0
  
-    # ── Gate 2: Coverage-aware shrinkage MD gate ──────────────────────────
-    # λi = κi/(κi+τ), where:
-    #   κi = eff_norm_i × sign_consistency_i × (1 + 10 × panel_coverage)
-    # panel_coverage = n_active_sources / n_genes
-    # sparse panels (VCC 96/5024) → stronger shrinkage than genome-wide screens
     md_gate = np.ones(n_edges, dtype=np.float64)
  
     if 'md_score' in exp_col_set and 'sign_agreement' in exp_col_set:
@@ -284,7 +376,6 @@ def build_experimental_modifiers(experimental_df, sources, targets, gene_names,
             boost      = (md_rank_norm[pos] > 0) & (lam_arr > 0)
             md_gate[matched_idx[boost]] = contrib[boost]
  
-    # ── Pert efficiency map ───────────────────────────────────────────────
     if 'pert_efficiency' in exp_col_set:
         eff_sub = (experimental_df[[src_col, 'pert_efficiency']]
                    .copy()
@@ -306,12 +397,6 @@ def build_experimental_modifiers(experimental_df, sources, targets, gene_names,
 def compute_dynamic_topology(W_sorted, src_sorted, tgt_sorted, k_core, n):
     """
     Compute degree-normalized FFL triangle counts T̃_st for each edge.
-
-    Raw triangle count T_st is normalized by sqrt(d_out(s) × d_in(t)),
-    removing the degree bias where hub nodes accumulate motif bonuses
-    purely by combinatorics (Dice coefficient normalization).
-
-    Returns T̃ array of same length as input, values in [0, 1].
     """
     te = min(int(n * k_core), len(W_sorted))
     T = np.zeros(len(W_sorted), dtype=np.float64)
@@ -325,7 +410,6 @@ def compute_dynamic_topology(W_sorted, src_sorted, tgt_sorted, k_core, n):
 
     Tgb = A.mxm(A, gb.semiring.plus_times).new(mask=A.S)
 
-    # d_out and d_in within the k_core subgraph
     do = np.zeros(n, dtype=np.float64)
     oi, ov = A.reduce_rowwise(gb.monoid.plus).new().to_coo()
     do[oi] = ov
@@ -348,7 +432,6 @@ def compute_dynamic_topology(W_sorted, src_sorted, tgt_sorted, k_core, n):
     else:
         mz = np.zeros(te, dtype=np.float64)
 
-    # Degree-normalized: T̃_st = T_st / sqrt(d_out(s) × d_in(t))
     denom = np.sqrt(np.maximum(do[cr] * di[cc], 1.0))
     v = mz > 0
     r = np.zeros(te, dtype=np.float64)
@@ -366,21 +449,12 @@ def select_edges(omega, W, src, tgt, pert_nodes, n, lam,
                  per_gene_kappa, kappa_base):
     """
     Select edges by descending omega score, respecting per-gene hub caps.
-
-    per_gene_kappa[s] is a multiplier (from PageRank): high-centrality
-    source genes get a relaxed cap. The effective cap for source s is:
-        cap(s) = int(n × kappa_base × per_gene_kappa[s])
-
-    This replaces the global hard cap, making kappa self-calibrating
-    to the actual regulatory hierarchy in the input graph.
     """
     budget = int(np.round(n * lam))
 
-    # Compute per-gene effective caps
     effective_caps = np.maximum(
         (per_gene_kappa * kappa_base * n).astype(np.int64), 1)
 
-    # Protect perturbation target edges
     prot = []
     for p in pert_nodes:
         pe = np.where(src == p)[0]
@@ -437,7 +511,7 @@ def select_edges(omega, W, src, tgt, pert_nodes, n, lam,
 
 
 # ---------------------------------------------------------------------------
-# Shatter checks (unchanged from v7.1 — logic is correct)
+# Shatter checks
 # ---------------------------------------------------------------------------
 
 def check_shatter(ss, st, sw, od, n, active, cfg):
@@ -470,7 +544,7 @@ def check_shatter(ss, st, sw, od, n, active, cfg):
 
 
 # ---------------------------------------------------------------------------
-# Utopia loss (unchanged from v7.1)
+# Utopia loss
 # ---------------------------------------------------------------------------
 
 def calculate_utopia_loss(ss, st, sw, n, od, active, kappa_base, ub, lw):
@@ -494,7 +568,6 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa_base, ub, lw):
         onset = 1.0 / (1.0 + np.exp(-sharpness * (dist_beyond / bound_width)))
         return w * min(base_penalty, 4.0) * onset
 
-    # Alpha
     ao = 1.0
     try:
         cap = int(n * 0.15)
@@ -506,7 +579,6 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa_base, ub, lw):
         pass
     ta = _p_smooth("alpha", ao, ub, lw)
 
-    # Gini
     go = 1.0
     try:
         if active > 1 and np.sum(od) > 0:
@@ -518,7 +590,6 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa_base, ub, lw):
         pass
     tg = _p_smooth("gini", go, ub, lw)
 
-    # S_max — uses kappa_base for consistency term
     smo = _safe((np.max(od) / n) if len(od) > 0 else 0.)
     kappa_frac = 0.25
     full_w = _safe(lw.get("S_max", 1.0), 1.0)
@@ -527,7 +598,6 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa_base, ub, lw):
     kappa_penalty = full_w * kappa_frac * kappa_excess ** 2
     ts = bound_penalty + kappa_penalty
 
-    # C, Q, Rho
     co, qo, ro = 0., 0., 1.
     tc = _safe(lw["C"], 1.)
     tq = _safe(lw["Q"], 1.)
@@ -597,7 +667,21 @@ def calculate_utopia_loss(ss, st, sw, n, od, active, kappa_base, ub, lw):
 def run_dash_and_score(params, W, W_q, D, sources, targets, n_genes,
                        perturbed_nodes, utopian_bounds, loss_weights,
                        shatter_cfg, per_gene_kappa, source_pert_impact,
-                       md_gate=None):
+                       md_gate=None, er_scores=None, er_eta=0.3,
+                       inter_mask=None, chi_prior=None):
+    """
+    Score a single hyperparameter configuration via the DASH kernel.
+
+    Parameters
+    ----------
+    ... (unchanged from v9.0) ...
+    er_scores : np.ndarray or None
+        Per-edge rank-normalized effective resistance scores in [0.05, 1.0],
+        same order as the presorted W/sources/targets arrays.
+        If None, the ER factor is 1.0 for all edges (backward-compatible).
+    er_eta : float
+        Exponent for R_st^η in the DASH score (default 0.3).
+    """
     try:
         beta, delta, kappa_base, k_core, lam, psi = params
         param_hash = abs(hash(tuple(float(p) for p in params))) % (2 ** 31)
@@ -613,19 +697,28 @@ def run_dash_and_score(params, W, W_q, D, sources, targets, n_genes,
         Ts = T_local[:Ne]
         pi_s = np.power(source_pert_impact[ss], psi)
         gate = md_gate[:Ne] if md_gate is not None else np.ones(Ne, dtype=np.float64)
-        num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s * gate
-       
-        # Per-source ranking for selection ordering
+        # ── SCBER factor ─────────────────────────────────────────────────────
+        # inter_mask=None  → flat ER (all edges, backward-compatible)
+        # inter_mask given → SCBER: ER boost only for inter-module edges
+        if er_scores is not None:
+            base_er = np.power(er_scores[:Ne], er_eta)
+            er = (np.where(inter_mask[:Ne], base_er, 1.0)
+                  if inter_mask is not None else base_er)
+        else:
+            er = np.ones(Ne, dtype=np.float64)
+        # ── χ prior (perturbation pleiotropy — global, all genes) ─────────────
+        chi = chi_prior[ss] if chi_prior is not None else np.ones(Ne, dtype=np.float64)
+        # ── DASH score ───────────────────────────────────────────────────────
+        num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s * gate * er * chi
+
         order = np.lexsort((-num, ss))
         so, to, Wo, no = ss[order], ts[order], Ws[order], num[order]
 
-        # Select edges with per-gene soft kappa
         mhs = shatter_cfg.get("max_hub_saturation", 0.15)
         surv_s, surv_t, surv_W = select_edges(
             no, Wo, so, to, perturbed_nodes, n_genes, lam,
             per_gene_kappa, kappa_base)
 
-        # Motif repair (3% budget — minimal cleanup only)
         surv_s, surv_t, surv_W = _motif_repair_swap(
             surv_s, surv_t, surv_W, no, so, to, n_genes,
             max_swap_fraction=0.03, rng=rng)
@@ -662,7 +755,6 @@ def run_dash_and_score(params, W, W_q, D, sources, targets, n_genes,
         except Exception:
             pass
 
-        # GWCC penalty (soft, not in loss targets — just prevents degenerate graphs)
         gp = 0.
         if gf < 0.45:
             gp = 8. * ((0.45 - gf) / 0.45) ** 2
@@ -690,18 +782,11 @@ def run_dash_and_score(params, W, W_q, D, sources, targets, n_genes,
 
 
 # ---------------------------------------------------------------------------
-# Motif repair swap (budget reduced to 3%)
+# Motif repair swap (budget 3%)
 # ---------------------------------------------------------------------------
 
 def _motif_repair_swap(surv_s, surv_t, surv_W, omega_full, src_full, tgt_full,
                         n_genes, max_swap_fraction=0.03, rng=None):
-    """
-    Budget-preserving triangle-closing edge swap at minimal scale (3%).
-
-    With the degree-normalized exponential FFL bonus now in the main score,
-    most triangle-closing edges should already be selected. This 3% pass
-    is a lightweight cleanup for edge cases only.
-    """
     n_selected = len(surv_s)
     budget_swaps = max(1, int(n_selected * max_swap_fraction))
 
@@ -769,12 +854,19 @@ def _motif_repair_swap(surv_s, surv_t, surv_W, omega_full, src_full, tgt_full,
 
 
 # ---------------------------------------------------------------------------
-# Graph reconstruction (for final output)
+# Graph reconstruction
 # ---------------------------------------------------------------------------
 
 def build_graph_from_params(params, W, W_q, D, sources, targets, n_genes,
                             perturbed_nodes, shatter_cfg, per_gene_kappa,
-                            source_pert_impact, md_gate=None):
+                            source_pert_impact, md_gate=None,
+                            er_scores=None, er_eta=0.3, inter_mask=None,
+                            chi_prior=None):
+    """
+    Reconstruct the final edge set for a given hyperparameter recipe.
+
+    er_scores / er_eta: same semantics as run_dash_and_score.
+    """
     beta, delta, kappa_base, k_core, lam, psi = params
     param_hash = abs(hash(tuple(float(p) for p in params))) % (2 ** 31)
     rng = np.random.default_rng(param_hash)
@@ -786,7 +878,14 @@ def build_graph_from_params(params, W, W_q, D, sources, targets, n_genes,
     ss, ts, Ts = sources[:Ne], targets[:Ne], T_local[:Ne]
     pi_s = np.power(source_pert_impact[ss], psi)
     gate = md_gate[:Ne] if md_gate is not None else np.ones(Ne, dtype=np.float64)
-    num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s * gate
+    if er_scores is not None:
+        base_er = np.power(er_scores[:Ne], er_eta)
+        er = (np.where(inter_mask[:Ne], base_er, 1.0)
+              if inter_mask is not None else base_er)
+    else:
+        er = np.ones(Ne, dtype=np.float64)
+    chi = chi_prior[ss] if chi_prior is not None else np.ones(Ne, dtype=np.float64)
+    num = (Wqs ** beta) * np.exp(delta * Ts) * pi_s * gate * er * chi
 
     order = np.lexsort((-num, ss))
     so, to, Wo, no = ss[order], ts[order], Ws[order], num[order]
@@ -806,21 +905,7 @@ def recompute_loss_from_metrics(metrics, utopian_bounds, loss_weights,
                                 kappa_base):
     """
     Recompute utopia loss from pre-recorded topology metrics.
-
-    Used by the R6 tournament to efficiently evaluate many bound variants
-    without re-running DASH: run DASH once, record metrics, then recompute
-    loss for each probe's proposed bounds.
-
-    Parameters
-    ----------
-    metrics : dict with keys 'alpha', 'Gini', 'S_max', 'Q', 'C', 'rho', 'gwcc_fraction'
-    utopian_bounds : dict {param: [lo, hi]}
-    loss_weights : dict {param: float}
-    kappa_base : float
-
-    Returns
-    -------
-    float — utopia loss
+    (Unchanged from v9.0 — ER does not affect loss computation.)
     """
 
     def _p_smooth(par, obs, ub, lw, buffer_frac=0.10, sharpness=5.0):
