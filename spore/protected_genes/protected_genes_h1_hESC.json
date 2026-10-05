@@ -1,0 +1,229 @@
+{
+    "metadata": {
+      "cell_type": "h1-hESC",
+      "cell_line": "WiCell WA01 (H1)",
+      "organism": "Homo sapiens",
+      "gene_id_format": "symbol",
+      "description": "Curated protected gene list for H1 human embryonic stem cells. Genes listed here are force-included in SPORE HVG selection regardless of variance threshold. Tier 1 genes are rescued first when space is limited; Tier 3 last.",
+      "tier_definitions": {
+        "1": "Core master regulators. Their absence fundamentally distorts pluripotency GRN topology. Always rescue these first.",
+        "2": "Critical pathway nodes and chromatin regulators. High-priority rescue — absence loses major biological axes.",
+        "3": "Extended regulatory context. Rescue when HVG budget allows. Absence acceptable at very low HVG counts."
+      },
+      "selection_criterion": "A gene is protected if: (a) it is a known TF or direct chromatin co-regulator in this cell type, AND (b) it is plausibly constitutively expressed (low variance, likely to be dropped by seurat_v3 HVG selection), OR (c) it is a master regulator whose regulatory output spans many downstream targets.",
+      "notes": "Gene symbols are HGNC standard. For datasets using Ensembl IDs, translate this list before loading. The 'user_defined' category is empty by default — add any study-specific genes there.",
+      "created": "2026-06-07",
+      "version": "1.0"
+    },
+    "protected_genes": {
+      "core_pluripotency": {
+        "tier": 1,
+        "rationale": "The OCT4/SOX2/NANOG triad defines pluripotency identity. POU5F1 is typically constitutively expressed at stable low-to-moderate levels in hESCs and is frequently filtered by variance-based HVG selection.",
+        "genes": [
+          "POU5F1",
+          "SOX2",
+          "NANOG"
+        ]
+      },
+      "extended_pluripotency": {
+        "tier": 2,
+        "rationale": "Secondary pluripotency factors and naive-state markers. Many are expressed at stable basal levels and thus low-variance. LIN28A and LIN28B regulate let-7 miRNAs and are important RNA-binding pluripotency factors.",
+        "genes": [
+          "KLF4",
+          "KLF2",
+          "MYC",
+          "LIN28A",
+          "LIN28B",
+          "SALL4",
+          "SALL2",
+          "ZNF281",
+          "ZFP42",
+          "NR0B1",
+          "TCF7L1",
+          "FOXD3",
+          "GDF3",
+          "DPPA4",
+          "PRDM14",
+          "ESRRB",
+          "TFCP2L1",
+          "NR5A2",
+          "TBX3",
+          "UTF1",
+          "ZIC3"
+        ]
+      },
+      "prc1_prc2_complex": {
+        "tier": 2,
+        "rationale": "Polycomb repressive complexes maintain bivalent chromatin at developmental gene promoters in hESCs. EZH2 and SUZ12 (PRC2) are often constitutively expressed at stable levels that fall below HVG thresholds.",
+        "genes": [
+          "EZH2",
+          "EZH1",
+          "SUZ12",
+          "EED",
+          "BMI1",
+          "RNF2",
+          "CBX7",
+          "CBX4",
+          "JARID2",
+          "PHF19",
+          "AEBP2"
+        ]
+      },
+      "nurd_complex": {
+        "tier": 2,
+        "rationale": "NuRD complex (nucleosome remodeling and deacetylase) is highly active in hESCs for gene silencing and chromatin compaction. Members are stably expressed and frequently filtered from HVG sets.",
+        "genes": [
+          "HDAC1",
+          "HDAC2",
+          "MBD3",
+          "CHD4",
+          "RBBP4",
+          "RBBP7",
+          "MTA1",
+          "MTA2",
+          "GATAD2A",
+          "GATAD2B"
+        ]
+      },
+      "dna_methylation": {
+        "tier": 2,
+        "rationale": "DNA methylation writers and erasers. TET enzymes and DNMTs are stably expressed in hESCs and regulate pluripotency gene promoters. Their constitutive expression makes them low-variance targets.",
+        "genes": [
+          "TET1",
+          "TET2",
+          "TET3",
+          "DNMT3A",
+          "DNMT3B",
+          "DNMT3L",
+          "UHRF1"
+        ]
+      },
+      "histone_methylation": {
+        "tier": 2,
+        "rationale": "H3K4, H3K27, H3K36, and H3K9 methyltransferases/demethylases that shape the hESC epigenetic landscape. KDM1A (LSD1) is a particularly critical pluripotency regulator.",
+        "genes": [
+          "KMT2A",
+          "KMT2D",
+          "KDM1A",
+          "KDM5B",
+          "KDM6A",
+          "KDM6B",
+          "SETD2",
+          "NSD1",
+          "NSD2",
+          "SETDB1"
+        ]
+      },
+      "hat_super_enhancer": {
+        "tier": 2,
+        "rationale": "HAT complexes and BET bromodomain proteins regulate super-enhancers at OCT4, NANOG, and SOX2 loci. BRD4 and MED1 are architectural components of pluripotency super-enhancers and often constitutively expressed.",
+        "genes": [
+          "BRD4",
+          "BRD2",
+          "BRD3",
+          "MED1",
+          "MED12",
+          "EP300",
+          "CREBBP",
+          "KAT2A",
+          "KAT2B"
+        ]
+      },
+      "swi_snf_baf": {
+        "tier": 2,
+        "rationale": "SWI/SNF (BAF) chromatin remodeling complexes are essential for maintaining open chromatin at pluripotency loci. SMARCA4 (BRG1) and CHD7 are critical for OCT4/SOX2 target accessibility.",
+        "genes": [
+          "SMARCA4",
+          "SMARCA2",
+          "SMARCC1",
+          "SMARCC2",
+          "ARID1A",
+          "ARID1B",
+          "CHD7",
+          "CHD1"
+        ]
+      },
+      "tgf_beta_nodal": {
+        "tier": 2,
+        "rationale": "TGF-β/NODAL/Activin signaling is the primary self-renewal pathway in primed hESCs. SMAD2/3/4 are the transducing TFs. SMAD2 and SMAD4 are frequently stable and low-variance.",
+        "genes": [
+          "SMAD2",
+          "SMAD3",
+          "SMAD4",
+          "SMAD1",
+          "SMAD5",
+          "FOXH1",
+          "NODAL",
+          "LEFTY1",
+          "LEFTY2"
+        ]
+      },
+      "lif_jak_stat": {
+        "tier": 2,
+        "rationale": "LIF/JAK/STAT3 pathway — primary self-renewal signal in naive PSCs and a secondary signal in primed hESCs. STAT3 is constitutively expressed but often below HVG variance threshold.",
+        "genes": [
+          "STAT3",
+          "JAK1",
+          "JAK2"
+        ]
+      },
+      "hippo_yap": {
+        "tier": 2,
+        "rationale": "YAP1 and TEAD4 mediate mechanotransduction and growth signals in hESCs. YAP1 nuclear localization supports OCT4 expression; its transcriptional activity is low-variance at baseline.",
+        "genes": [
+          "YAP1",
+          "TEAD4",
+          "TEAD1",
+          "LATS1",
+          "LATS2",
+          "WWTR1"
+        ]
+      },
+      "wnt_signaling": {
+        "tier": 3,
+        "rationale": "WNT/β-catenin signaling influences pluripotency exit and naive-primed transitions. CTNNB1 (β-catenin) is ubiquitously expressed and likely filtered from HVG sets.",
+        "genes": [
+          "CTNNB1",
+          "TCF7L2",
+          "TCF7",
+          "LEF1",
+          "GSK3B",
+          "APC"
+        ]
+      },
+      "chromatin_architecture": {
+        "tier": 3,
+        "rationale": "CTCF and cohesin organize TADs and enhancer-promoter loops at pluripotency loci. These architectural proteins are constitutively expressed and almost always filtered by variance-based HVG selection.",
+        "genes": [
+          "CTCF",
+          "CTCFL",
+          "RAD21",
+          "SMC1A",
+          "SMC3",
+          "NIPBL",
+          "WAPL",
+          "RIF1"
+        ]
+      },
+      "cell_cycle_pluripotency": {
+        "tier": 3,
+        "rationale": "hESCs have an unusual cell cycle with a compressed G1. E2F1/CDK4/CDK6/CCND1 regulate the G1 checkpoint in a way tightly linked to pluripotency maintenance. Often low-variance in cycling hESCs.",
+        "genes": [
+          "E2F1",
+          "E2F3",
+          "CDK4",
+          "CDK6",
+          "CCND1",
+          "CCND2",
+          "RB1",
+          "RBL1",
+          "RBL2"
+        ]
+      },
+      "user_defined": {
+        "tier": 2,
+        "rationale": "Study-specific genes added manually. This category is intended for genes not covered by the curated categories above but relevant to the specific experimental question.",
+        "genes": []
+      }
+    }
+  }

@@ -1,0 +1,322 @@
+input:
+  graph_path: ../DATA/SHROOM_outputs/shroom_2_selftrain/RPE1_5k_essential_selftrain_dense_graph.parquet
+  sc_data_path: c:/Users/studi/OneDrive/Documents/thesis/DATA/EXPERIMENTS/exp_025_hyphae_vs_shroom_ensemble/rpe1_run/RPE1_hybrid_train_lognorm.h5ad
+  perturbation_column: gene
+  control_label: non-targeting
+  is_metacell: true
+  metacell_pooling_factor: 10
+experimental_grn:
+  enabled: false
+  alpha_md: 0.5
+output:
+  root_dir: ../DATA/FUNGI_outputs
+  phases:
+  - phase0_diagnostics
+  - phase1_ingestion
+  - phase2_normalization
+  - phase3_expansive_search
+  - phase5_refinement
+  - phase6_champion
+  figures_dir: ../DATA/FUNGI_outputs/figures
+lambda_user:
+  target: 40
+  halfwidth: 10
+bounds_override:
+  alpha:
+  - 2.0
+  - 2.8
+  gini_in:
+  - 0.45
+  - 0.6
+  S_max:
+  - 0.09
+  - 0.18
+  C:
+  - 0.08
+  - 0.2
+  rho:
+  - -0.35
+  - -0.05
+  reciprocity:
+  - 0.02
+  - 0.12
+diagnostics:
+  n_bootstrap: 200
+  de_method: wilcoxon
+  de_pval_threshold: 0.05
+  de_lfc_threshold: 0.25
+  knn_k_range:
+  - 5
+  - 10
+  - 15
+  - 20
+  weight_floor: 1.0
+  weight_ceiling: 50.0
+  max_cells_for_de: 20000
+  max_perts_for_de: 500
+  n_jobs: 6
+  bound_constraints:
+    alpha:
+      delta_min: 0.28
+      delta_max: 0.8
+      hard_floor: 1.1
+      hard_ceiling: 4.0
+    gini:
+      delta_min: 0.2
+      delta_max: 0.4
+      hard_floor: 0.0
+      hard_ceiling: 1.0
+    gini_in:
+      delta_min: 0.1
+      delta_max: 0.4
+      hard_floor: 0.0
+      hard_ceiling: 1.0
+    S_max:
+      delta_min: 0.02
+      delta_max: 0.1
+      hard_floor: 0.01
+      hard_ceiling: 0.3
+    Q:
+      delta_min: 0.1
+      delta_max: 0.4
+      hard_floor: -0.5
+      hard_ceiling: 1.0
+    C:
+      delta_min: 0.05
+      delta_max: 0.3
+      hard_floor: 0.0
+      hard_ceiling: 0.35
+    rho:
+      delta_min: 0.1
+      delta_max: 0.4
+      hard_floor: -1.0
+      hard_ceiling: 1.0
+organic_targets:
+  alpha:
+    enabled: true
+  gini:
+    enabled: false
+  gini_in:
+    enabled: true
+  Q:
+    enabled: false
+  S_max:
+    enabled: true
+  C:
+    enabled: true
+  rho:
+    enabled: true
+  reciprocity:
+    enabled: true
+effective_resistance:
+  enabled: true
+  epsilon: 0.35
+  eta_inter: 0.28
+  eta_feat: 0.0
+  seed: 42
+  leiden_resolutions:
+  - 0.3
+  - 0.5
+  - 0.8
+  - 1.0
+  - 1.3
+  - 1.6
+  - 2.0
+  leiden_min_communities: 10
+  leiden_max_dominant_fraction: 0.5
+chi_prior:
+  enabled: true
+  zeta: 0.5
+causal_weight:
+  gamma: 2.0
+prefilter:
+  target_density: 0.25
+dash_kernel:
+  weight:
+    enabled: true
+  ffl:
+    enabled: true
+  pert_impact:
+    enabled: true
+  rdf:
+    enabled: true
+  scber:
+    enabled: true
+  chi_s:
+    enabled: true
+  chi_t:
+    enabled: true
+  rho:
+    enabled: true
+  m_intra:
+    enabled: true
+hyperparameter_bounds:
+  beta:
+  - 5.7277
+  - 5.7277
+  delta:
+  - 1.5573
+  - 1.5573
+  kappa:
+  - 0.0673
+  - 0.0673
+  k_core:
+  - 17.1851
+  - 17.1851
+  lambda_density:
+  - 0.006
+  - 0.01
+  psi:
+  - 2.9231
+  - 2.9231
+  nu:
+  - 0.1069
+  - 0.1069
+  m_intra:
+  - 4.236
+  - 4.236
+  sigma_scber:
+  - 0.783
+  - 0.783
+  zeta_s:
+  - 0.4503
+  - 0.4503
+  tau_indeg:
+  - 0.7835
+  - 0.7835
+  eta_out:
+  - -3.0
+  - 0.0
+expansive_search:
+  n_samples: 512
+  n_workers: 2
+  chunk_size: 6
+  random_seed: 42
+shatter:
+  max_orphan_fraction: 0.15
+  min_gwcc_fraction: 0.5
+  min_target_coverage: 0.4
+  lambda_min: 2.0
+  lambda_max: 55.0
+  s_max_ceiling_multiplier: 2.0
+  s_max_ceiling_hard_cap: 0.3
+  min_clustering_gamma: 1.5
+  synthetic_min_clustering: null
+refinement:
+  density_mode_epsilon: 1e-6
+  top_fraction: 0.05
+  n_gmm_components: 5
+  region_samples_per_round: 256
+  chunk_size: 6
+  good_loss_quantile: 0.15
+  bad_loss_quantile: 0.7
+  n_boundary_probes: 200
+  run_delta_kcore_grid: true
+  max_basins: 6
+  cluster_pool_cap: 2000
+  frontier_shortlist_k: 12
+  global_improve_patience: 2
+  min_fitness_improvement: 0.005
+  redetection_passes: 2
+  dbscan_eps: 0.97
+  dbscan_min_samples: 14
+  trust_region:
+    init_radius_frac: 0.25
+    min_radius_frac: 0.02
+    expand_factor: 1.5
+    shrink_factor: 0.5
+    success_streak_to_expand: 2
+    failure_streak_to_shrink: 2
+    max_rounds_per_region: 12
+  surrogate:
+    enabled: true
+    min_points: 40
+    oversample: 6
+    score_full_round: false
+secondary_objective:
+  enabled: true
+  density_floor_edges: 50000
+  density_ref_quantile: 0.95
+  biologic_to_synthetic:
+    metrics:
+    - epr_k
+    - eff_resist
+    windows:
+      eff_resist:
+      - 175.0
+      - 288.0
+    weights:
+      epr_k: 1.0
+      eff_resist: 1.0
+      density: 0.0
+    compute_spectral_on: never
+  synthetic_to_biologic:
+    metrics:
+    - epr_k
+    - alpha
+    - gini_in
+    - S_max
+    - C
+    - rho
+    - reciprocity
+    windows:
+      alpha:
+      - 2.22
+      - 2.5
+      gini_in:
+      - 0.55
+      - 0.69
+      S_max:
+      - 0.089
+      - 0.18
+      C:
+      - 0.097
+      - 0.157
+      rho:
+      - -0.31
+      - 0.0
+      reciprocity:
+      - 0.02
+      - 0.12
+    weights:
+      epr_k: 1.5
+      alpha: 0.8
+      gini_in: 0.6
+      S_max: 0.6
+      C: 0.6
+      rho: 0.4
+      reciprocity: 0.6
+      density: 0.0
+    compute_spectral_on: never
+pagerank_kappa:
+  alpha: 0.85
+  n_iter: 60
+  hub_percentile: 99.0
+  hub_multiplier: 3.0
+audit:
+  cohort_size: 1
+runtime:
+  single_threaded_blas: true
+  random_seed: 42
+  log_level: INFO
+gpu:
+  enabled: true
+  use_ray_pipeline: true
+  batch_size: null
+  vram_budget_gb: 5.0
+  n_ffl_buckets: 8
+fungi_mode: biologic
+synthetic_targets:
+  spectra_depth_L: 3
+  min_reach_frac: 0.5
+  epr_k_floor_fraction: 0.55
+  eff_resist_window:
+  - 175.0
+  - 288.0
+  exact_spectral_finalists: true
+  window_tighten_frac: 0.0
+  weight_entropy_max: 5.2
+  demote_to_secondary: []
+  demote_weight: 0.0
+_exp035_provenance: 'E2 honest full-freedom: widened + sigma_scber/zeta_s + tau_indeg;
+  LITERATURE bands (frozen)'

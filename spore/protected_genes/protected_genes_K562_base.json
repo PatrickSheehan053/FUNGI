@@ -1,0 +1,197 @@
+{
+    "metadata": {
+      "cell_type": "K562",
+      "cell_line": "K562 (ATCC CCL-243)",
+      "organism": "Homo sapiens",
+      "gene_id_format": "symbol",
+      "dataset_gene_id_format": "ensembl",
+      "description": "Curated protected gene list for K562 chronic myeloid leukemia cells. Genes listed here are force-included in SPORE HVG selection regardless of variance threshold. The Replogle 2022 dataset uses Ensembl gene IDs; translate this symbol list to Ensembl before loading.",
+      "tier_definitions": {
+        "1": "Core master regulators. Their absence fundamentally distorts hematopoietic/CML GRN topology. Always rescue these first.",
+        "2": "Critical pathway nodes and chromatin regulators. High-priority rescue.",
+        "3": "Extended regulatory context. Rescue when HVG budget allows."
+      },
+      "selection_criterion": "A gene is protected if: (a) it is a known TF or direct chromatin co-regulator in K562 cells, AND (b) it is plausibly constitutively expressed (low variance, likely to be dropped by HVG selection), OR (c) it is a master regulator whose regulatory output spans many downstream targets.",
+      "notes": "Gene symbols are HGNC standard. Replogle 2022 K562 datasets (K562_gwps and K562_essential) use Ensembl IDs. Translate before loading. K562 is a BCR-ABL+ CML line with erythroid/megakaryocytic differentiation capacity.",
+      "source_dataset": "Replogle et al. 2022, Cell 185:2559-2575",
+      "created": "2026-06-17",
+      "version": "1.0"
+    },
+    "protected_genes": {
+      "core_hematopoietic_tfs": {
+        "tier": 1,
+        "rationale": "The GATA1/GATA2/TAL1/KLF1/MYB axis defines K562 identity. MYB is the master regulator occupying ~1/3 of K562 super-enhancers (Lemma 2021). GATA1/TAL1 co-regulate erythroid genes and globin loci. RUNX1 and FLI1 are essential for megakaryocytic programs.",
+        "genes": [
+          "GATA1",
+          "GATA2",
+          "TAL1",
+          "KLF1",
+          "MYB",
+          "RUNX1",
+          "FLI1",
+          "ERG",
+          "NFE2"
+        ]
+      },
+      "bcr_abl_signaling": {
+        "tier": 1,
+        "rationale": "K562 is defined by the BCR-ABL1 fusion oncogene. STAT5A/B are the primary transcriptional effectors of BCR-ABL signaling. ABL1 and BCR are often stably expressed and low-variance.",
+        "genes": [
+          "BCR",
+          "ABL1",
+          "STAT5A",
+          "STAT5B",
+          "JAK2",
+          "SRC",
+          "GRB2",
+          "CRK",
+          "CRKL"
+        ]
+      },
+      "erythroid_megakaryocytic": {
+        "tier": 2,
+        "rationale": "K562 cells can differentiate along erythroid and megakaryocytic lineages. GFI1B is critical for erythroid silencing, LMO2 for TAL1 complex formation, LDB1 as bridging factor. IKZF1 (Ikaros) regulates lymphoid-to-myeloid fate decisions.",
+        "genes": [
+          "GFI1B",
+          "LMO2",
+          "LDB1",
+          "IKZF1",
+          "IKZF3",
+          "TCF3",
+          "HEMGN",
+          "KLF3",
+          "ZBTB7A"
+        ]
+      },
+      "myeloid_lineage": {
+        "tier": 2,
+        "rationale": "Myeloid TFs that maintain K562 in the CML progenitor state. SPI1 (PU.1) and CEBPA define the myeloid program. IRF8 drives monocytic commitment.",
+        "genes": [
+          "SPI1",
+          "CEBPA",
+          "CEBPB",
+          "CEBPD",
+          "IRF8",
+          "IRF1",
+          "ETV6",
+          "MEIS1"
+        ]
+      },
+      "signaling_pathways": {
+        "tier": 2,
+        "rationale": "Key signaling mediators downstream of BCR-ABL and growth factor receptors. STAT3, MAPK, PI3K-AKT-mTOR pathways are constitutively active in K562.",
+        "genes": [
+          "STAT3",
+          "STAT1",
+          "MAPK1",
+          "MAPK3",
+          "AKT1",
+          "MTOR",
+          "PIK3CA",
+          "PIK3R1",
+          "RAF1",
+          "BRAF"
+        ]
+      },
+      "chromatin_epigenetic": {
+        "tier": 2,
+        "rationale": "Chromatin regulators with known K562 ChIP-seq data in ENCODE. BRD4 occupies super-enhancers at MYB and GATA loci. EZH2/PRC2 silences developmental programs. KAT2A and EP300 are co-activators at hematopoietic enhancers.",
+        "genes": [
+          "BRD4",
+          "BRD2",
+          "BRD3",
+          "EP300",
+          "CREBBP",
+          "KAT2A",
+          "KAT2B",
+          "HDAC1",
+          "HDAC2",
+          "HDAC3",
+          "KDM1A",
+          "KDM5B"
+        ]
+      },
+      "polycomb_trithorax": {
+        "tier": 2,
+        "rationale": "PRC2 maintains bivalent chromatin at lineage-specifying loci in K562 progenitors. KMT2A (MLL) rearrangements are common in leukemia and KMT2A targets overlap with MYB targets.",
+        "genes": [
+          "EZH2",
+          "EZH1",
+          "SUZ12",
+          "EED",
+          "BMI1",
+          "RNF2",
+          "KMT2A",
+          "KMT2D",
+          "SETD2",
+          "NSD1"
+        ]
+      },
+      "swi_snf_remodeling": {
+        "tier": 2,
+        "rationale": "SWI/SNF (BAF) complexes maintain accessible chromatin at GATA1 and MYB binding sites. SMARCA4 (BRG1) is essential for erythroid gene activation in K562.",
+        "genes": [
+          "SMARCA4",
+          "SMARCA2",
+          "SMARCC1",
+          "ARID1A",
+          "ARID1B",
+          "CHD4",
+          "CHD1"
+        ]
+      },
+      "cell_cycle_apoptosis": {
+        "tier": 3,
+        "rationale": "K562 lacks functional TP53 (homozygous deletion) but retains RB1. Cell cycle and apoptosis regulators are critical for CML proliferation. BCL2 and MCL1 are targets of BCR-ABL survival signaling.",
+        "genes": [
+          "MYC",
+          "MYCN",
+          "RB1",
+          "E2F1",
+          "CDK4",
+          "CDK6",
+          "CCND1",
+          "CCND2",
+          "BCL2",
+          "MCL1",
+          "CDKN1A",
+          "CDKN1B",
+          "CDKN2A"
+        ]
+      },
+      "rna_processing_splicing": {
+        "tier": 3,
+        "rationale": "RNA splicing factors are recurrently mutated in myeloid malignancies and are essential genes in K562 (Replogle DepMap). SF3B1, U2AF1, SRSF2 are stably expressed and often below HVG variance thresholds.",
+        "genes": [
+          "SF3B1",
+          "U2AF1",
+          "U2AF2",
+          "SRSF2",
+          "SRSF1",
+          "HNRNPA1",
+          "HNRNPC",
+          "PRPF8",
+          "DDX41"
+        ]
+      },
+      "chromatin_architecture": {
+        "tier": 3,
+        "rationale": "CTCF and cohesin organize TADs and enhancer-promoter loops at hematopoietic loci. Constitutively expressed and typically filtered by variance-based HVG selection.",
+        "genes": [
+          "CTCF",
+          "RAD21",
+          "SMC1A",
+          "SMC3",
+          "NIPBL",
+          "WAPL",
+          "STAG1",
+          "STAG2"
+        ]
+      },
+      "user_defined": {
+        "tier": 2,
+        "rationale": "Study-specific genes added manually.",
+        "genes": []
+      }
+    }
+  }

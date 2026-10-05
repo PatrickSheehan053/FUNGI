@@ -1,0 +1,44 @@
+# data/cell_configs/h1_hesc.yaml -- stub. sc_input is null until H1-hESC
+# single-cell data is integrated; see k562.yaml's header comment for the
+# graceful-degradation contract this relies on.
+cell_line: H1-hESC
+sc_input: null
+gold_dir: DATA/gold_standards
+pert_col: gene
+control_label: non-targeting
+min_cells_per_perturbation: 3
+
+split:
+  test_size: 0.2
+  random_state: 0
+
+databases:
+  string_network:
+    enabled: true
+  string_physical:
+    enabled: true
+  chipseq:
+    enabled: true
+    source: encode_h1hesc
+    file: OBJECTS/obj_003_grn_bio_evaluator_v2/data/chipseq/encode_h1hesc_chip_targets.tsv
+  collectri:
+    enabled: true
+  knocktf:
+    enabled: true
+  trrust_v2:
+    enabled: true
+
+go_enrichment:
+  organism: hsapiens
+  sources: ["GO:BP"]
+  min_regulon_size: 5
+  significance_threshold: 0.05
+  correction_method: "fdr"  # see rpe1.yaml comment -- "fdr_bh" 500s on g:Profiler's API
+
+# obj_003.1 causal-evidence panel (v2.1) -- mirror of rpe1.yaml (stub cell line).
+causal_panel:
+  enabled: true
+  causal_databases: ["collectri", "trrust_v2", "knocktf", "chipseq"]
+  coexpression_databases: ["string_network", "string_physical"]
+  motif:
+    enabled: false

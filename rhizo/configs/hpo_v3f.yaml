@@ -1,0 +1,49 @@
+# obj_009.3 (RHIZO-final) — the ASSEMBLED model's OWN HPO. Seeded from the known-good region (HPC v_fuse t0001
+# d64/dh128/K6/α0.15/gcnii0.1 + 5090 t0013 d32/dh64/K12/α0.05) but RE-SEARCHED — the new directed-topology
+# features (edge_profile: directed_topo) move the optimum, so the prior winners are ANCHORS (a starting reference
+# to beat), NOT an inheritance (Patrick's rule). sampler.seed=200 ≠ any prior draw (5090 seed 0, HPC seed 100).
+#
+# OBJECTIVE = gap_vs_topweight (aggregate RSC, paired bootstrap). ALSO logged per trial (not the objective):
+# gap_vs_knn, gap_coexpr_resid (residualized RSC — FUNGI's expected win), dnsa_ge2hop_gap (directed long-range).
+# The A/B question this sweep settles: does the REAL directed-topology profile (regulatory) widen the gap vs the
+# clean profile — AND vs kNN on the residualized/directional axes?
+
+base:
+  arms: [fungi_bio, top_weight, knn, shuffle]   # FUNGI + honest opponents (kNN first-class) + degree-shuffle null
+  rung: rung2                                   # the sweep objective is on rung2 (fast); the WINNER is confirmed on
+                                                # BOTH rungs + seeds 0-4 by gauntlet_v3f.py (do NOT double the sweep)
+  seeds: [0, 1, 2]
+  epochs: 130
+  patience: 12
+  min_delta: 5.0e-4
+  delta_mode: neg_mu_ctrl
+
+model:
+  variant: assembled                            # edge_clean + FiLM + over-squash ; teleport/deepK/gcnii swept below
+
+search:                                         # centered on the known-good region, re-tuned for the new features
+  edge_profile:    [clean, directed_topo]       # A/B: does the REAL regulatory feature set widen the gap? (regulatory == directed_topo)
+  d:               [32, 64]
+  d_hidden:        [64, 128, 256]
+  K:               [6, 8, 12]
+  teleport_alpha:  [0.05, 0.15]
+  gcnii_beta:      [0.0, 0.1]
+  film:            [true]                        # confirmed widener ON (ablated one-off by the gauntlet, not here)
+  ovsq:            [true]                        # confirmed widener ON
+  lr:              [1.0e-3, 2.0e-3]
+  weight_decay:    [1.0e-4]
+  batch_perts:     [16]
+
+sampler:
+  method: random
+  n_trials: 40
+  seed: 200                                      # DIFFERENT draw from every prior sweep (no config overlap)
+
+objective: gap_vs_topweight                      # primary; leaderboard also carries gap_vs_knn + coexpr_resid + dnsa
+
+hardware:                                        # 2-3 V100s (32 GB each), packed. Patrick sets --gpus at launch.
+  gpus: [0, 1]                                   # default 2; pass --gpus 0,1,2 for 3
+  usable_vram_gb: 30
+  max_concurrent: 6
+  safety_factor: 1.15
+  min_batch: 8

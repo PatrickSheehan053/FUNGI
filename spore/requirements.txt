@@ -1,0 +1,34 @@
+# SPORE_light (coverage-fixed, one-stop) — pip dependencies.
+# Every third-party package imported by any workflow script (spore_light.py + SPORE_light/src/*.py)
+# is listed here. Version floors are the ones this pipeline was validated against (RPE1 canary,
+# 2026-07-08). numpy>=2 is REQUIRED (the code uses np.trapezoid; np.trapz was removed in numpy 2.0).
+#
+#   python -m venv venv && source venv/bin/activate   # (Windows: venv\Scripts\activate)
+#   pip install -r requirements.txt
+
+# ── core numerics / IO ──────────────────────────────────────────────────────
+numpy>=2.0
+scipy>=1.11
+pandas>=2.0
+scikit-learn>=1.3
+h5py>=3.9
+PyYAML>=6.0
+psutil>=5.9
+
+# ── single-cell stack ───────────────────────────────────────────────────────
+anndata>=0.10
+scanpy>=1.10
+
+# ── metacell aggregation (Phase 12 control-preserving mbk_k2) ────────────────
+joblib>=1.3
+threadpoolctl>=3.1
+
+# ── batch correction (Phase 10 Harmony) ─────────────────────────────────────
+harmonypy>=0.0.9
+
+# ── gene-ID harmonization (Phase 1; only used when var has no symbol column) ─
+mygene>=3.2
+
+# ── plotting (only used when plotting.save_figures: true) ────────────────────
+matplotlib>=3.7
+seaborn>=0.12

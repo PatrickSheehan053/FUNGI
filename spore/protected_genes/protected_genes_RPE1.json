@@ -1,0 +1,214 @@
+{
+    "metadata": {
+      "cell_type": "RPE1",
+      "cell_line": "hTERT-RPE1 (ATCC CRL-4000)",
+      "organism": "Homo sapiens",
+      "gene_id_format": "symbol",
+      "dataset_gene_id_format": "ensembl",
+      "description": "Curated protected gene list for hTERT-immortalized retinal pigment epithelial (RPE1) cells. Genes listed here are force-included in SPORE HVG selection regardless of variance threshold. The Replogle 2022 dataset uses Ensembl gene IDs; translate this symbol list to Ensembl before loading.",
+      "tier_definitions": {
+        "1": "Core master regulators. Their absence fundamentally distorts the RPE GRN topology. Always rescue these first.",
+        "2": "Critical pathway nodes and chromatin regulators. High-priority rescue.",
+        "3": "Extended regulatory context. Rescue when HVG budget allows."
+      },
+      "selection_criterion": "A gene is protected if: (a) it is a known TF or direct chromatin co-regulator in RPE cells, AND (b) it is plausibly constitutively expressed (low variance, likely to be dropped by HVG selection), OR (c) it is a master regulator whose regulatory output spans many downstream targets.",
+      "notes": "RPE1 is non-cancerous, hTERT-immortalized, near-euploid, adherent, and p53-positive (unlike K562). This line was used in the Replogle 2022 essential-gene CRISPRi screen (~2,057 essential genes targeted). Gene symbols are HGNC standard; translate to Ensembl before loading.",
+      "source_dataset": "Replogle et al. 2022, Cell 185:2559-2575",
+      "created": "2026-06-17",
+      "version": "1.0"
+    },
+    "protected_genes": {
+      "core_rpe_identity": {
+        "tier": 1,
+        "rationale": "MITF and OTX2 are the core RPE identity TFs. MITF drives melanin biosynthesis and RPE-specific gene expression. OTX2 co-regulates MITF targets (TYR, TYRP1, DCT) and is essential for RPE differentiation and maintenance (Martinez-Morales 2003). LHX2 forms a transcriptional module with OTX2 containing LDB1 and SWI/SNF (Raviv 2023 PLOS Bio). SOX9 cooperates with OTX2 to activate RPE65 and RLBP1.",
+        "genes": [
+          "MITF",
+          "OTX2",
+          "SOX9",
+          "LHX2",
+          "PAX6",
+          "LDB1",
+          "VSX2"
+        ]
+      },
+      "p53_rb_axis": {
+        "tier": 1,
+        "rationale": "RPE1 is p53-positive (unlike K562 which has homozygous TP53 deletion). The p53/RB axis is the primary tumor suppressor pathway and defines RPE1's non-cancerous character. CDKN1A (p21) is the primary p53 effector. These are typically constitutively expressed at stable levels.",
+        "genes": [
+          "TP53",
+          "RB1",
+          "CDKN1A",
+          "CDKN1B",
+          "MDM2",
+          "MDM4"
+        ]
+      },
+      "tert_telomere": {
+        "tier": 1,
+        "rationale": "RPE1 is immortalized by hTERT expression. TERT and telomere maintenance factors define this cell line's identity and proliferative capacity.",
+        "genes": [
+          "TERT",
+          "POT1",
+          "TERF1",
+          "TERF2",
+          "TINF2"
+        ]
+      },
+      "melanogenesis_visual_cycle": {
+        "tier": 2,
+        "rationale": "RPE-specific melanin biosynthesis and visual cycle genes regulated by the MITF/OTX2 module. TYR, TYRP1, DCT encode melanogenic enzymes. RPE65 and RLBP1 are visual cycle components. Expression may be reduced in the immortalized line but the regulatory circuits remain relevant.",
+        "genes": [
+          "TYR",
+          "TYRP1",
+          "DCT",
+          "PMEL",
+          "RPE65",
+          "RLBP1",
+          "RDH5",
+          "BEST1",
+          "TRPM1"
+        ]
+      },
+      "epithelial_identity": {
+        "tier": 2,
+        "rationale": "RPE1 is an adherent epithelial line. Epithelial junction proteins, keratins, and cell-cell adhesion molecules define the epithelial phenotype. CDH1 (E-cadherin) and TJP1 (ZO-1) are typically stably expressed and low-variance.",
+        "genes": [
+          "CDH1",
+          "CDH3",
+          "KRT8",
+          "KRT18",
+          "KRT19",
+          "TJP1",
+          "TJP2",
+          "CLDN1",
+          "OCLN",
+          "VIM",
+          "EZR"
+        ]
+      },
+      "cell_cycle_checkpoint": {
+        "tier": 2,
+        "rationale": "RPE1 has an intact G1 checkpoint (functional p53/RB). Cell cycle regulators control the balance between proliferation and quiescence. E2F family members and CDKs are constitutively expressed.",
+        "genes": [
+          "E2F1",
+          "E2F3",
+          "E2F4",
+          "CDK4",
+          "CDK6",
+          "CDK2",
+          "CCND1",
+          "CCNE1",
+          "MYC"
+        ]
+      },
+      "dna_damage_response": {
+        "tier": 2,
+        "rationale": "RPE1 has intact DNA damage response pathways (unlike many cancer lines). ATM/ATR and downstream checkpoint kinases are essential for maintaining genomic stability. These are stably expressed housekeeping genes.",
+        "genes": [
+          "ATM",
+          "ATR",
+          "CHEK1",
+          "CHEK2",
+          "BRCA1",
+          "BRCA2",
+          "RAD51",
+          "XRCC1",
+          "PARP1"
+        ]
+      },
+      "chromatin_epigenetic": {
+        "tier": 2,
+        "rationale": "Core chromatin regulators. BRD4 and EP300 are at RPE super-enhancers. PRC2 (EZH2/SUZ12) maintains bivalent chromatin. KDM1A (LSD1) is widely required in epithelial gene regulation.",
+        "genes": [
+          "BRD4",
+          "BRD2",
+          "EP300",
+          "CREBBP",
+          "KAT2A",
+          "HDAC1",
+          "HDAC2",
+          "EZH2",
+          "SUZ12",
+          "EED",
+          "KDM1A",
+          "KMT2A",
+          "KMT2D",
+          "SETD2"
+        ]
+      },
+      "swi_snf_remodeling": {
+        "tier": 2,
+        "rationale": "SWI/SNF (BAF) complexes are part of the LHX2-OTX2 RPE transcriptional module (Raviv 2023). SMARCA4 (BRG1) is essential for RPE gene activation.",
+        "genes": [
+          "SMARCA4",
+          "SMARCA2",
+          "SMARCC1",
+          "ARID1A",
+          "ARID1B",
+          "CHD4"
+        ]
+      },
+      "tgfb_bmp_signaling": {
+        "tier": 2,
+        "rationale": "TGF-beta/BMP signaling regulates epithelial-mesenchymal transition and RPE differentiation. SMAD2/3/4 are the core signal transducers. Critical for RPE barrier function.",
+        "genes": [
+          "SMAD2",
+          "SMAD3",
+          "SMAD4",
+          "SMAD1",
+          "TGFBR1",
+          "TGFBR2",
+          "BMPR1A",
+          "BMPR2",
+          "ACVR1"
+        ]
+      },
+      "wnt_signaling": {
+        "tier": 3,
+        "rationale": "WNT signaling regulates RPE proliferation and differentiation. CTNNB1 is constitutively expressed at stable levels.",
+        "genes": [
+          "CTNNB1",
+          "APC",
+          "GSK3B",
+          "TCF7L2",
+          "LEF1",
+          "AXIN1",
+          "AXIN2"
+        ]
+      },
+      "mtor_autophagy": {
+        "tier": 3,
+        "rationale": "mTOR signaling and autophagy are critical for RPE homeostasis and photoreceptor outer segment degradation. Constitutively active and stably expressed.",
+        "genes": [
+          "MTOR",
+          "RPTOR",
+          "RICTOR",
+          "TSC1",
+          "TSC2",
+          "ULK1",
+          "ATG5",
+          "ATG7",
+          "BECN1",
+          "LAMP2"
+        ]
+      },
+      "chromatin_architecture": {
+        "tier": 3,
+        "rationale": "CTCF and cohesin organize 3D genome structure. Stably expressed, typically filtered by HVG selection.",
+        "genes": [
+          "CTCF",
+          "RAD21",
+          "SMC1A",
+          "SMC3",
+          "NIPBL",
+          "STAG1",
+          "STAG2"
+        ]
+      },
+      "user_defined": {
+        "tier": 2,
+        "rationale": "Study-specific genes added manually.",
+        "genes": []
+      }
+    }
+  }

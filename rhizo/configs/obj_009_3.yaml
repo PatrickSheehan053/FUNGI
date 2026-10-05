@@ -1,0 +1,54 @@
+# obj_009.3 (RHIZO-final) — base config. The frozen HP mirror the obj_009.1/009.2 line so the assembled model's
+# gauntlet is comparable; the HPO (hpo_v3f.yaml) re-searches d/d_hidden/K/teleport/gcnii on top.
+
+data_cache_sha256: "309b72154977490ea578089b73c05cdfe3abda473adf69ddec6d3c0250ec363e"
+
+frozen_hp:
+  d: 32
+  d_hidden: 64
+  K: 12                              # carry depth (5090 t0013); the HPO winner overrides this in the gauntlet
+  oversmooth: jk
+  dropout: 0.1
+  teleport_alpha: 0.05
+  gcnii_beta: 0.1
+  dropedge_p: 0.0
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  batch_perts: 16
+  epochs: 130
+  patience: 12
+  min_delta: 5.0e-4
+  grad_clip: 1.0
+  corr_weight: 1.0
+  mse_weight: 0.1
+  delta_mode: neg_mu_ctrl
+
+# the assembled RHIZO-final model (see model_v3f.py). dir/attn DISABLED (retained-not-deleted).
+model:
+  variant: assembled
+  edge_profile: directed_topo        # regulatory == directed_topo ; the HPO A/B toggles it vs clean
+  with_dash: true                    # dash_recomp column ON (flagged-redundant; credited only if it passes V7)
+
+# arms (kNN is FIRST-CLASS). Nulls run every gauntlet cell.
+arms:
+  gauntlet: [fungi_bio, knn, top_weight, mst]
+  nulls: [shuffle, reverse, labelperm, empty]
+
+metrics:
+  primary: rsc                       # aggregate RSC gap (fungi − arm)
+  causal: [rsc_coexpr_resid, dnsa_ge2hop, dsrsc_ge2]   # the axes where FUNGI's directed structure should win
+  bootstrap_B: 10000
+  bfs_cap: 6
+
+# the new directed higher-order topology feature columns (compute_topo_features.py) — each credited only if it
+# passes V7 (verify_v3f). NO external/identity priors; NO FUNGI stored pruning scores (both forbidden).
+directed_topo_new_cols: [ffl_fwd, ffl_fanout, cyc3, part_src, part_tgt, dash_recomp]
+
+verification:
+  psi0_gate: true                    # test_invariant_v3f.py must PASS before any training
+  nulls_collapse: [shuffle, reverse, labelperm, empty]
+  v7_per_feature: true               # φ_e-permutation per NEW feature must collapse the gain (else = artifact)
+
+run:
+  hyphae_abort_glob: ["HYPHAE/for_chinmaya/output*", "HYPHAE/**/*dense*graph*", "**/*hyphae*parquet*"]
+  cpu_threads: 4

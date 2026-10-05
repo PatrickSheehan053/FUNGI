@@ -1,0 +1,66 @@
+# data/cell_configs/rpe1.yaml
+# RPE1 (hTERT-RPE1) cell-line config for obj_003_grn_bio_evaluator_v2.
+#
+# gold_dir points at the SHARED gold-standard cache already validated by
+# obj_001 and exp_003b (DATA/gold_standards) -- STRING/ChIP-seq/CollecTRI/
+# KnockTF reuse those exact cached files (v11.5 STRING, deliberately not
+# bumped to v12.0 here; see databases_v2.py's module docstring for why).
+# Only TRRUST is newly downloaded into this same shared directory.
+cell_line: RPE1
+sc_input: DATA/SPORE_outputs/RPE1/splits/RPE1_5k_essential_train.h5ad
+gold_dir: DATA/gold_standards
+pert_col: gene
+control_label: non-targeting
+min_cells_per_perturbation: 3
+
+split:
+  test_size: 0.2
+  random_state: 0
+  stratify_col: pert_col
+
+stat_metrics:
+  p_threshold: 0.05
+  min_cells: 3
+
+databases:
+  string_network:
+    enabled: true
+  string_physical:
+    enabled: true
+  chipseq:
+    enabled: true
+    source: hepg2_proxy
+  collectri:
+    enabled: true
+  knocktf:
+    enabled: true
+  trrust_v2:
+    enabled: true
+
+go_enrichment:
+  organism: hsapiens
+  sources: ["GO:BP"]
+  min_regulon_size: 5
+  significance_threshold: 0.05
+  # g:Profiler's actual API values are "fdr" | "g_SCS" | "bonferroni" -- NOT
+  # the statsmodels-style "fdr_bh" the design doc originally specified, which
+  # causes a server-side HTTP 500 on every query (confirmed empirically while
+  # testing this object; see go_enrichment.py's module docstring).
+  correction_method: "fdr"
+
+# obj_003.1 causal-evidence panel (v2.1). Perturbation-independent, full-TF-coverage
+# causal evidence, reported SEPARATELY from STRING co-expression, so substrate/
+# intervention verdicts are not biased by (a) stat_prec's perturbed-source-only
+# coverage or (b) MD's shared measurement basis. Tier 1 = pure set algebra over the
+# already-loaded gold DBs (no new downloads). Tier 2 (motif) is OFF by default.
+causal_panel:
+  enabled: true
+  causal_databases: ["collectri", "trrust_v2", "knocktf", "chipseq"]   # directed TF->target
+  coexpression_databases: ["string_network", "string_physical"]        # context only, NOT causal
+  motif:
+    enabled: true                                                       # Tier 2 staged (--motif to run)
+    # aertslab cisTarget hg38 mc_v10_clust gene-based 10kb up/down (staged session 15)
+    ranking_db: DATA/motif/hg38_10kbp_up_down_full.genes_vs_motifs.rankings.feather
+    motif2tf:  DATA/motif/motifs-v10-nr.hgnc.tbl
+    tss_window: "10kb"
+    nes_threshold: 3.0

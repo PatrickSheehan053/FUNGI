@@ -1,0 +1,18 @@
+# obj_009.2 HPC_sbatch_strengthen — runtime deps. All data + graph caches are BUNDLED (data/, intermediate/
+# graph_caches/), so NO anndata / parquet / substrate rebuild is needed on the cluster.
+#
+# IMPORTANT — V100 = compute capability sm_70. Install a torch build matching the HPC's CUDA:
+#   CUDA 12.1:  pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   CUDA 11.8:  pip install torch --index-url https://download.pytorch.org/whl/cu118
+#   NEVER cu128 (that targets sm_120 / 5090; it will not run on a V100).
+# If the HPC provides torch via `module load`, use that and pip-install only the rest below.
+
+torch>=2.1              # install the CUDA-matched build separately (see note above)
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+pyyaml>=6
+scikit-learn>=1.2       # MiniBatchKMeans / TruncatedSVD are unused at run time; safe to include
+networkx>=3.0           # + python-louvain: only if you REBUILD the clean φ_e (bundled -> optional at runtime)
+python-louvain>=0.16
+joblib>=1.3

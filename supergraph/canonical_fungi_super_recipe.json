@@ -1,0 +1,43 @@
+{
+  "headline": "6/6 frozen RPE1 literature targets reached SIMULTANEOUSLY on the fused Super parent (utopia_loss=0.0 vs LITERATURE bands, not relaxed), healthy interior champion (margin 0.0505). No true ceiling.",
+  "canonical_fungi_super_recipe": {
+    "parent": "global causal-norm (preserve causal hub magnitude) + within-source coexp, fusion w_c=0.3",
+    "fungi": "frozen literature bands, density lambda in [8,70] (champion lambda~11, ~55.7k edges), levers sigma_scber~0.94 zeta_s~0.26 tau_indeg~1.51 (in-degree spreader), k_core~34 m_intra~3.0 beta~1.05",
+    "champion_metrics": {
+      "alpha": 2.436,
+      "gini_in": 0.57,
+      "S_max": 0.097,
+      "C": 0.104,
+      "rho": -0.091,
+      "reciprocity": 0.051
+    },
+    "interior_margin": 0.0505,
+    "n_edges": 55669,
+    "utopia_loss_vs_literature": 0.0,
+    "within_lit": "6/6"
+  },
+  "ablation_within_lit_vs_frozen_literature": {
+    "A0_matched_no_levers": "3/6",
+    "D2_levers_no_tauindeg": "4/6",
+    "within_source+tau_indeg": "5/6",
+    "global_wc0.5+tau_indeg": "5/6 (S_max overshoot 0.198)",
+    "global_wc0.3+tau_indeg": "6/6 (WINNER)",
+    "global_wc0.7+tau_indeg": "2/6 (alpha breaks 3.24)"
+  },
+  "levers": {
+    "causal_norm=global": "preserves causal hub magnitude -> S_max reachable without breaking alpha",
+    "tau_indeg": "target anti-promiscuity penalty -> spreads in-edges -> rescues gini_in 0.80->0.57",
+    "w_c": "tunes causal magnitude/S_max under global-norm (0.3 sweet spot; 0.5 overshoots; 0.7 breaks alpha) -- NOT inert under global-norm, though inert for causal-FRACTION"
+  },
+  "cotension_pooled_spearman": {
+    "S_max|alpha": -0.061,
+    "S_max|gini_in": -0.505,
+    "S_max|C": -0.447,
+    "gini_in|reciprocity": 0.391,
+    "alpha|gini_in": 0.267
+  },
+  "cotension_verdict": "moderate (strongest S_max<->gini_in -0.51) but 6/6 achieved -> NO genuine anti-correlation wall; all 6 literature targets jointly reachable",
+  "task6_drop_replace": "NOT NEEDED -- no target has a proven ceiling; all 6 reached",
+  "Q_revisit": "OPTIONAL BONUS (7th target) -- not required to salvage the result; recommend as follow-up",
+  "contrast_with_soft_cohort": "soft C2 reached 0-loss only by RELAXING bands to 3/6-literature; honest G_global_wc03 reaches 0-loss on ACTUAL frozen literature at 6/6"
+}

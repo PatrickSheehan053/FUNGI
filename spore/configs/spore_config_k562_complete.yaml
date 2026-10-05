@@ -1,0 +1,111 @@
+# SPORE (coverage-fixed) config for the FULL Replogle K562 dataset — mirror of the RPE1 complete config
+# (spore_light_config_rpe1_complete_run3.yaml). Emits a fresh spore_out_k562_complete/ (avoids the
+# stale-checkpoint reuse bug). Ribo exemption is in the FIXED SPORE code (phase02); the complete protected
+# list is wired into phase-8 HVG so EVERY held-out perturbation target survives as a graph node.
+#
+# >>> SET the 3 paths marked `# SET ME` on the HPC before running (K562 raw data lives on the HPC). <<<
+
+spore_plus_path: SET_ME/HPC_K562_SPORE_launch/SPORE_light          # SET ME: abs path to this package's SPORE_light
+paths:
+  project_root: SET_ME                                             # SET ME: HPC working root (paths below resolve under it)
+  raw_h5ad: SET_ME/k562_raw_singlecell.h5ad                        # SET ME: the FULL Replogle K562 raw h5ad on the HPC
+  processed_dir: spore_out_k562_complete/processed                 # FRESH dir (do NOT reuse an old spore_out — checkpoint bug)
+  splits_dir:    spore_out_k562_complete/splits
+  figures_dir:   spore_out_k562_complete/figures
+  log_dir:       spore_out_k562_complete/logs
+
+dataset:
+  name: K562_essential
+  organism: human
+  cell_type: K562
+  perturbation_col: gene            # confirm the Replogle K562 perturbation column name; 'gene' matches RPE1
+  control_label: non-targeting
+  perturbation_type: CRISPRi
+  gene_id_format: ensembl           # Replogle var = ensembl; protected list is SYMBOLS -> phase08 translates
+
+runtime:
+  n_jobs: 8                         # bump on the V100 nodes
+  sparse_on_load: true
+  memory_monitor: true
+  large_dataset_mode: auto
+  large_dataset_threshold: 500000   # K562 genome-wide is large -> large-dataset mode auto-engages
+  checkpointing: true
+
+phase0_ingestion: {chunk_size: 50000}
+phase1_detection:
+  enabled: true
+  gene_id_harmonization: true
+  modality_detection: false
+  combinatorial_detection: false
+  cell_line_detection: false
+
+phase2_cell_triage:                 # ribo EXEMPTION for perturbation targets is in the fixed phase02 code
+  mt_method: explicit_list
+  mt_threshold: 0.2
+  mt_genes: [MT-ND1, MT-ND2, MT-ND3, MT-ND4, MT-ND4L, MT-ND5, MT-ND6, MT-CO1, MT-CO2, MT-CO3, MT-ATP6, MT-ATP8, MT-CYB]
+  ribo_prefixes: [RPL, RPS]
+  min_genes_per_cell: 200
+  max_genes_per_cell: 10000
+  min_counts_per_cell: 500
+  max_counts_per_cell: 80000
+
+phase3_ambient: {enabled: false}
+phase4_doublets: {enabled: false}
+phase5_escaper_filtering:
+  efficiency_threshold: 0.5
+  escaper_percentile: 10
+  min_cells_per_perturbation: 50
+  direction: auto
+
+phase6_gene_triage:
+  min_cells_expressing: 10
+  pct_filter: 0.01
+  mean_umi_threshold: 0.25
+  rescue_perturbation_targets: true
+  rescue_combinatorial_constituents: false
+
+phase7_splits:
+  mode: zero_shot                   # gene-disjoint perturbation split; val/test perturbations never train the graph
+  random_seed: 42
+  stratify_bins: 4
+  # >>> SCALE test_n/val_n to the K562 perturbation count (~20% test / ~10% val of SURVIVING perts).
+  #     RPE1 essential (~1516 perts) used test 306 / val 153. Genome-wide K562 (~9-10k perts) -> ~2000 / ~1000.
+  #     Set after you know the surviving-pert count (SPORE logs it at phase 5/6), or start with these.
+  test_n: 306                       # SET/scale to K562
+  val_n: 153                        # SET/scale to K562
+
+phase8_hvg:
+  enabled: true
+  n_top_genes: 5000
+  method: seurat_v3
+  rescue_perturbation_targets: true
+  # exp_009.1: held-out (val/test) target coverage is now AUTOMATIC (Phase 8 force-carries every val/test
+  # target identity from the split JSON — no hand-built "complete" list needed). This points at the CURATED
+  # base tiers only (biological realism). Set to null to rely purely on the automatic force-carry.
+  protected_gene_list: protected_genes/protected_genes_K562_base.json
+
+phase9_normalization: {target_sum: 10000, log_transform: true, method: lognorm}
+
+phase10_confounders:
+  cell_cycle_regression: true
+  s_genes: tirosh2016
+  g2m_genes: tirosh2016
+  batch_correction: {enabled: true, method: harmony, batch_key: gemgroup, confounding_ari_threshold: 0.5, min_cells_per_batch: 50}
+  imputation_prohibited: true
+  fit_on_train_only: true
+
+phase11_cell_line: {enabled: false}
+
+phase12_metacell:
+  enabled: true
+  target_cells_per_metacell: 10
+  min_metacells_per_pert: 5
+  min_cells_per_metacell: 3
+  systema_calibration: true
+  compute_quality_metrics: true
+  inner_variance_warn_threshold: 2.0
+  suffix: _metacell
+
+subsetter: {n_perts: 250, max_cells_per_pert: 60, max_ctrl_cells: 3000, min_genes_per_cell: 200, chunk_size: 5000, seed: 42}
+plotting: {style: dark, dpi: 150, save_figures: false, figure_format: png}
+output: {cleanup_intermediates: true, generate_report: true}

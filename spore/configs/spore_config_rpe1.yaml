@@ -1,0 +1,271 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  spore_light_config_RPE1.yaml
+#  SPORE_light configuration for RPE1 Essential (Replogle 2022) micrograph run
+#
+#  Dataset:   hTERT-RPE1 essential-scale Perturb-seq, day 7 post-transduction
+#  Paper:     Replogle et al. 2022, Cell 185:2559-2575
+#  Download:  https://plus.figshare.com/articles/dataset/20029387
+#             File: rpe1_raw_singlecell_01.h5ad
+#  Direct:    https://plus.figshare.com/ndownloader/files/35775606
+#
+#  Scale:     ~300k cells, ~9464 genes (Ensembl IDs in raw file)
+#             ~1526 perturbations (essential genes), CRISPRi
+#             -> feasible on 64GB RAM without subsetting
+#
+#  Micrograph settings (for CHITIN investigation):
+#    n_top_genes: 1500  (RPE1 has 1512+ perturbation targets needing rescue)
+#    test_n: 150, val_n: 100  (~10%/7% of 1512 perturbations)
+#
+#  Output after Phase 12:
+#    DATA/SPORE_outputs/RPE1/processed/RPE1_essential_{train,val,test}_metacell.h5ad
+#    -> Feed each to chitin_sweep.py to generate CHITIN variants
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Path to SPORE_plus source code. spore_light.py will also check for a
+# sibling directory named SPORE_plus if this key is absent.
+spore_plus_path: C:/Users/studi/OneDrive/Documents/thesis/SPORE_plus
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PATHS
+# ───────────────────────────────────────────────────────────────────────────
+paths:
+  # Absolute project root — all other paths are relative to this
+  project_root: C:/Users/studi/OneDrive/Documents/thesis
+
+  # Raw h5ad: rename to match the exact filename after download
+  # Figshare file: rpe1_raw_singlecell_01.h5ad
+  raw_h5ad: DATA/scRNA-seq/rpe1_raw_singlecell_01.h5ad
+
+  # SPORE output directories (created automatically if absent)
+  processed_dir:     DATA/SPORE_outputs/RPE1/processed
+  splits_dir:        DATA/SPORE_outputs/RPE1/splits
+  figures_dir:       DATA/SPORE_outputs/RPE1/figures
+  log_dir:           DATA/SPORE_outputs/RPE1/logs
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  DATASET
+# ───────────────────────────────────────────────────────────────────────────
+dataset:
+  name:              RPE1_5k_essential
+  organism:          human
+  cell_type:         RPE1
+  perturbation_col:  gene          # obs column with perturbation gene names/IDs
+  control_label:     non-targeting  # label for control cells in perturbation_col
+  perturbation_type: CRISPRi
+  gene_id_format:    ensembl        # raw h5ad uses Ensembl IDs; Phase 1 translates to symbols
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  RUNTIME  (laptop: 8 cores, 64 GB RAM)
+# ───────────────────────────────────────────────────────────────────────────
+runtime:
+  n_jobs:                  6      # matches i7 physical core count (6 cores / 12 logical via hyperthreading)
+  sparse_on_load:          true
+  memory_monitor:          true
+  large_dataset_mode:      auto
+  large_dataset_threshold: 500000  # cells; RPE1 at ~300k stays in-process
+  checkpointing:           true    # Phase 12 shard checkpoints (crash recovery)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 0  Data Ingestion
+# ───────────────────────────────────────────────────────────────────────────
+phase0_ingestion:
+  chunk_size: 50000
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 1  Detection
+# ───────────────────────────────────────────────────────────────────────────
+phase1_detection:
+  enabled:                  true
+  gene_id_harmonization:    true   # Ensembl -> HGNC symbol via mygene.py
+  modality_detection:       false
+  combinatorial_detection:  false
+  cell_line_detection:      false
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 2  Cell-Level QC
+# ───────────────────────────────────────────────────────────────────────────
+phase2_cell_triage:
+  mt_method:           explicit_list
+  mt_threshold:        0.20
+  mt_genes:
+    - MT-ND1
+    - MT-ND2
+    - MT-ND3
+    - MT-ND4
+    - MT-ND4L
+    - MT-ND5
+    - MT-ND6
+    - MT-CO1
+    - MT-CO2
+    - MT-CO3
+    - MT-ATP6
+    - MT-ATP8
+    - MT-CYB
+  ribo_prefixes:        [RPL, RPS]
+  min_genes_per_cell:   200
+  max_genes_per_cell:   10000
+  min_counts_per_cell:  500
+  max_counts_per_cell:  80000
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 3  Ambient RNA  (disabled — RPE1 doesn't need SoupX)
+# ───────────────────────────────────────────────────────────────────────────
+phase3_ambient:
+  enabled: false
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 4  Doublet Detection  (disabled for speed on laptop)
+# ───────────────────────────────────────────────────────────────────────────
+phase4_doublets:
+  enabled: false
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 5  Escaper Filtering
+# ───────────────────────────────────────────────────────────────────────────
+phase5_escaper_filtering:
+  efficiency_threshold:       0.50   # remove cells where KD efficiency < 50%
+  escaper_percentile:         10
+  min_cells_per_perturbation: 50     # drop perturbations with < 50 surviving cells
+  direction:                  auto   # auto-detect KD vs OE direction
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 6  Gene-Level Triage
+# ───────────────────────────────────────────────────────────────────────────
+phase6_gene_triage:
+  min_cells_expressing:              10
+  pct_filter:                        0.01   # remove genes in < 1% cells
+  mean_umi_threshold:                0.25
+  rescue_perturbation_targets:       true
+  rescue_combinatorial_constituents: false
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 7  Data Splits
+#  Using fixed absolute counts (not ratios) for stable val/test sizes.
+#  At ~1500 RPE1 perts after triage: 20 val + 20 test = ~1460 train.
+# ───────────────────────────────────────────────────────────────────────────
+phase7_splits:
+  mode:          zero_shot
+  random_seed:   42
+  stratify_bins: 4
+  test_n:        306
+  val_n:         153
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 8  HVG Selection
+#  n_top_genes: 1000 for micrograph CHITIN investigation
+#  Change to 5000 for a full-scale run comparable to VCC_4
+# ───────────────────────────────────────────────────────────────────────────
+phase8_hvg:
+  enabled:                     true
+  # RPE1 Essential has 1512+ surviving perturbation targets, all rescued into
+  # the HVG set. At n_top_genes=1000, targets overflow via STACK giving 2162 genes.
+  # At n_top_genes=1500, seurat_v3 selects 1500 HVGs and target rescue uses SWAP
+  # (displacing low-variance genes), keeping the budget close to 1500.
+  n_top_genes:                 5000
+  method:                      seurat_v3
+  rescue_perturbation_targets: true
+  # Protected genes: force-includes key RPE1 TFs regardless of variance rank
+  # 324 genes + 227 Tahoe drug targets. Symbols translated from JSON at runtime.
+  protected_gene_list: C:\Users\studi\OneDrive\Documents\thesis\SPORE_plus\protected_genes\protected_genes_RPE1.json
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 9  Normalization
+# ───────────────────────────────────────────────────────────────────────────
+phase9_normalization:
+  target_sum:    10000
+  log_transform: true
+  method:        lognorm
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 10  Confounder Mitigation (cell cycle regression + Harmony)
+# ───────────────────────────────────────────────────────────────────────────
+phase10_confounders:
+  cell_cycle_regression: true
+  s_genes:               tirosh2016
+  g2m_genes:             tirosh2016
+  batch_correction:
+    enabled:                    true
+    method:                     harmony
+    batch_key:                  gemgroup  # Replogle obs column for experimental batch
+    confounding_ari_threshold:  0.5
+    min_cells_per_batch:        50
+  imputation_prohibited: true
+  fit_on_train_only:     true
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 11  Cell Line Detection
+#  RPE1 is a single cell line — auto-detect will confirm K=1 and move on.
+# ───────────────────────────────────────────────────────────────────────────
+phase11_cell_line:
+  enabled: false   # single cell line, skip full HDBSCAN scan for speed
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 12  Metacell Aggregation
+#  RPE1 with ~1500 perts and 8 joblib workers: est. 30-90 min.
+#  Shard checkpointing (every 500 groups) enables crash recovery.
+# ───────────────────────────────────────────────────────────────────────────
+phase12_metacell:
+  enabled:                       true
+  target_cells_per_metacell:     10    # aim for 10 cells/metacell
+  min_metacells_per_pert:        5     # drop perts with < 5 metacells
+  min_cells_per_metacell:        3
+  systema_calibration:           true
+  compute_quality_metrics:       true
+  inner_variance_warn_threshold: 2.0
+  suffix:                        _metacell
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PHASE 13  CHITIN — intentionally absent
+#  CHITIN is a separate downstream tool (chitin_sweep.py, to be built).
+#  spore_light.py stops after Phase 12 metacell output.
+#  Then run chitin_sweep.py on the train_metacell.h5ad with multiple
+#  (k, n_pcs, metric) combinations to generate the CHITIN variant library.
+# ───────────────────────────────────────────────────────────────────────────
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  SUBSETTER CONFIG  (only used with --subset-first / --subset-only)
+#  Not needed for RPE1 (300k cells). Configure here for K562 when ready.
+# ───────────────────────────────────────────────────────────────────────────
+subsetter:
+  n_perts:            250    # top N perturbations by cell count
+  max_cells_per_pert:  60    # reservoir-sample this many cells per perturbation
+  max_ctrl_cells:    3000    # max non-targeting control cells
+  min_genes_per_cell:  200   # QC filter during obs scan
+  chunk_size:         5000   # cells per read chunk during Pass 2
+  seed:                 42
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  PLOTTING
+# ───────────────────────────────────────────────────────────────────────────
+plotting:
+  style:        dark
+  dpi:          150
+  save_figures: true     # save plots to figures_dir
+  figure_format: png
+
+
+# ───────────────────────────────────────────────────────────────────────────
+#  OUTPUT
+# ───────────────────────────────────────────────────────────────────────────
+output:
+  cleanup_intermediates: true   # keep p8, p9, p10 intermediate files
+  generate_report:       true
